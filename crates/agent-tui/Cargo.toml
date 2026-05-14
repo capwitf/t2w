@@ -1,0 +1,9 @@
+[package]
+name = "agent-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agent-core = { path = "../agent-core" }

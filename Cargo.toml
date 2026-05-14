@@ -1,0 +1,43 @@
+[workspace]
+members = [
+    "crates/agent-cli",
+    "crates/agent-core",
+    "crates/agent-server",
+    "crates/agent-skills",
+    "crates/agent-tui",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["T"]
+repository = "https://example.com/t2w"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-stream = "0.3"
+axum = "0.8"
+bytes = "1.10"
+clap = { version = "4.5", features = ["derive", "env"] }
+futures = "0.3"
+http = "1.3"
+mime = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+tempfile = "3.16"
+thiserror = "2.0"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1.45", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.17", features = ["serde", "v4"] }
+walkdir = "2.5"
+webbrowser = "1.0"
