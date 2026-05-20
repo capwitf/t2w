@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: t2w-windows-x86_64
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            package: t2w-macos-aarch64
+            archive: tar
+          - os: macos-13
+            target: x86_64-apple-darwin
+            package: t2w-macos-x86_64
+            archive: tar
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            package: t2w-linux-x86_64
+            archive: tar
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin t2w --bin t2w-studio
+
+      - name: Package Windows archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $package = "${{ matrix.package }}"
+          $target = "${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$package" | Out-Null
+          Copy-Item "target/$target/release/t2w.exe" "dist/$package/"
+          Copy-Item "target/$target/release/t2w-studio.exe" "dist/$package/"
+          Copy-Item "README.md" "dist/$package/"
+          Copy-Item "README_zh.md" "dist/$package/"
+          Copy-Item "LICENSE" "dist/$package/"
+          New-Item -ItemType Directory -Force "dist/$package/docs/assets" | Out-Null
+          Copy-Item "docs/assets/*" "dist/$package/docs/assets/"
+          Compress-Archive -Path "dist/$package/*" -DestinationPath "dist/$package.zip" -Force
+          $hash = (Get-FileHash "dist/$package.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $package.zip" | Set-Content "dist/$package.zip.sha256"
+
+      - name: Package Unix archive
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="${{ matrix.package }}"
+          target="${{ matrix.target }}"
+          mkdir -p "dist/${package}"
+          cp "target/${target}/release/t2w" "dist/${package}/"
+          cp "target/${target}/release/t2w-studio" "dist/${package}/"
+          cp README.md README_zh.md LICENSE "dist/${package}/"
+          mkdir -p "dist/${package}/docs/assets"
+          cp docs/assets/* "dist/${package}/docs/assets/"
+          tar -czf "dist/${package}.tar.gz" -C dist "${package}"
+          shasum -a 256 "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256

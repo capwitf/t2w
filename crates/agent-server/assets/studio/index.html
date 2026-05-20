@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>t2w Studio</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/studio.css">
+  <script src="/studio.js" defer></script>
+</head>
+<body>
+  <div
+    id="studio-app"
+    data-sessions-url="/sessions"
+    data-templates-url="/templates"
+    data-skills-url="/skills"
+  >
+    <header class="app-header">
+      <div class="brand-block">
+        <div>
+          <p class="eyebrow">t2w Studio</p>
+          <h1 id="session-title-heading">Local draft</h1>
+        </div>
+        <button id="config-toggle" class="ghost-button mobile-only" type="button" aria-expanded="false">
+          Configure
+        </button>
+      </div>
+      <div class="header-actions">
+        <div class="status-stack">
+          <div class="status-pair">
+            <span class="status-label">Session</span>
+            <span id="session-status-badge" class="status-badge">draft</span>
+          </div>
+          <div class="status-pair">
+            <span class="status-label">Run</span>
+            <span id="run-status-badge" class="status-badge muted">idle</span>
+          </div>
+        </div>
+        <button id="download-button" class="ghost-button" type="button" disabled>
+          Download HTML
+        </button>
+        <button id="cancel-button" class="ghost-button" type="button" hidden>
+          Cancel
+        </button>
+        <button id="run-button" class="primary-button" type="button">
+          Run
+        </button>
+      </div>
+    </header>
+
+    <div id="global-message" class="global-message" role="status" hidden></div>
+
+    <div class="workspace-layout">
+      <aside class="session-pane" aria-label="Sessions">
+        <div class="pane-header">
+          <div>
+            <p class="pane-eyebrow">Sessions</p>
+            <h2>Current process</h2>
+          </div>
+          <button id="new-draft-button" class="ghost-button" type="button">
+            New draft
+          </button>
+        </div>
+        <p id="draft-banner" class="pane-note">No saved session selected. Changes stay local until you run.</p>
+        <div id="session-list" class="session-list"></div>
+      </aside>
+
+      <main class="preview-shell">
+        <div class="preview-header">
+          <div>
+            <p class="pane-eyebrow">Preview</p>
+            <h2 id="selected-template-name">Table Explorer</h2>
+            <p id="selected-template-description" class="subtle-copy">High-density structured table artifact</p>
+          </div>
+          <div class="summary-grid">
+            <div>
+              <span class="summary-label">Provider</span>
+              <span id="provider-summary">mock</span>
+            </div>
+            <div>
+              <span class="summary-label">Model</span>
+              <span id="model-summary">mock-model</span>
+            </div>
+            <div>
+              <span class="summary-label">Snapshot</span>
+              <span id="snapshot-summary">enabled</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="preview-stage">
+          <div id="preview-placeholder" class="preview-placeholder">
+            <strong>No artifact yet.</strong>
+            <span>Save or run the current draft to load the preview iframe.</span>
+          </div>
+          <iframe id="preview-frame" title="Studio preview" sandbox="allow-scripts"></iframe>
+        </div>
+
+        <div class="run-meta">
+          <div>
+            <span class="summary-label">Phase</span>
+            <span id="run-phase">idle</span>
+          </div>
+          <div>
+            <span class="summary-label">Snapshot Path</span>
+            <span id="run-snapshot">none</span>
+          </div>
+          <div class="run-error-block">
+            <span class="summary-label">Error</span>
+            <span id="run-error">none</span>
+          </div>
+        </div>
+      </main>
+
+      <aside id="config-panel" class="config-panel" aria-label="Configuration">
+        <div class="pane-header">
+          <div>
+            <p class="pane-eyebrow">Configuration</p>
+            <h2>Studio controls</h2>
+          </div>
+        </div>
+
+        <div class="tab-row" role="tablist" aria-label="Studio tabs">
+          <button id="tab-prompt" class="tab-button is-active" type="button" role="tab" aria-selected="true" data-tab="prompt">
+            Prompt
+          </button>
+          <button id="tab-data" class="tab-button" type="button" role="tab" aria-selected="false" data-tab="data">
+            Data
+          </button>
+          <button id="tab-theme" class="tab-button" type="button" role="tab" aria-selected="false" data-tab="theme">
+            Theme
+          </button>
+          <button id="tab-run" class="tab-button" type="button" role="tab" aria-selected="false" data-tab="run">
+            Run
+          </button>
+        </div>
+
+        <div class="tab-panels">
+          <section class="tab-panel is-active" data-panel="prompt" role="tabpanel" aria-labelledby="tab-prompt">
+            <label class="field-label" for="title-input">Title</label>
+            <input id="title-input" class="text-input" type="text" autocomplete="off">
+
+            <label class="field-label" for="instruction-input">Instruction</label>
+            <textarea id="instruction-input" class="text-area" rows="10"></textarea>
+
+            <div class="field-group">
+              <div class="field-heading">
+                <span class="field-label">Skills</span>
+                <span class="field-hint">Local prompt injection only</span>
+              </div>
+              <div id="skills-list" class="option-list"></div>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-panel="data" role="tabpanel" aria-labelledby="tab-data">
+            <label class="field-label" for="stdin-input">Input data</label>
+            <textarea id="stdin-input" class="text-area" rows="18"></textarea>
+          </section>
+
+          <section class="tab-panel" data-panel="theme" role="tabpanel" aria-labelledby="tab-theme">
+            <label class="field-label" for="template-select">Template</label>
+            <select id="template-select" class="text-input"></select>
+            <p id="template-description" class="subtle-copy"></p>
+          </section>
+
+          <section class="tab-panel" data-panel="run" role="tabpanel" aria-labelledby="tab-run">
+            <label class="field-label" for="provider-select">Provider</label>
+            <select id="provider-select" class="text-input">
+              <option value="mock">mock</option>
+              <option value="anthropic">anthropic</option>
+            </select>
+
+            <label class="field-label" for="model-input">Model</label>
+            <input id="model-input" class="text-input" type="text" autocomplete="off">
+
+            <label class="checkbox-row" for="persist-snapshot-input">
+              <input id="persist-snapshot-input" type="checkbox">
+              <span>Persist HTML snapshot to disk</span>
+            </label>
+
+            <div class="field-group compact-group">
+              <div class="field-heading">
+                <span class="field-label">Latest run</span>
+              </div>
+              <dl class="detail-list">
+                <div>
+                  <dt>Status</dt>
+                  <dd id="run-status-detail">idle</dd>
+                </div>
+                <div>
+                  <dt>Phase</dt>
+                  <dd id="run-phase-detail">idle</dd>
+                </div>
+                <div>
+                  <dt>Snapshot</dt>
+                  <dd id="run-snapshot-detail">none</dd>
+                </div>
+                <div>
+                  <dt>Error</dt>
+                  <dd id="run-error-detail">none</dd>
+                </div>
+              </dl>
+            </div>
+          </section>
+        </div>
+      </aside>
+    </div>
+  </div>
+</body>
+</html>

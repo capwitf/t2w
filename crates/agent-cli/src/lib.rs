@@ -1,8 +1,14 @@
+use std::collections::BinaryHeap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
+use agent_core::artifact_shell::{
+    ArtifactShellContext, artifact_title_from_instruction, render_artifact_shell,
+    render_artifact_shell_stream_chunk, render_artifact_shell_stream_finish,
+    render_artifact_shell_stream_start,
+};
 use agent_core::prompt::{ContextSnapshot, InjectedSkill, build_prompt_request};
 use agent_core::provider::{
     AnthropicConfig, AnthropicProvider, LlmProvider, MockProvider, ProviderError,
@@ -20,6 +26,8 @@ use tracing::Level;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
+
+pub mod studio;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "t2w")]
@@ -111,6 +119,7 @@ where
         .collect::<Vec<_>>();
     let workspace_files = collect_workspace_files(&cwd)?;
     let session_id = Uuid::new_v4().to_string();
+    let shell_context = build_cli_artifact_shell_context(&args, &stdin, &config);
 
     let prompt = build_prompt_request(
         &ContextSnapshot {
@@ -135,13 +144,24 @@ where
 
         let provider = build_provider(args.provider, &config)?;
         let mut stream = provider.stream_html(prompt);
-        let mut final_html = String::new();
+        let mut artifact_html = String::new();
+
+        session
+            .push_html(&render_artifact_shell_stream_start(&shell_context))
+            .await;
 
         while let Some(next) = stream.next().await {
             let chunk = next.map_err(normalize_provider_error)?;
-            final_html.push_str(&chunk);
-            session.push_html(&chunk).await;
+            artifact_html.push_str(&chunk);
+            session
+                .push_html(&render_artifact_shell_stream_chunk(&chunk))
+                .await;
         }
+
+        session
+            .push_html(&render_artifact_shell_stream_finish())
+            .await;
+        let final_html = render_artifact_shell(&shell_context, &artifact_html);
 
         let snapshot_path = if args.no_snapshot {
             None
@@ -179,7 +199,15 @@ where
 }
 
 fn resolve_config(args: &CliArgs, cwd: &Path) -> Result<ResolvedConfig> {
-    let file_config = match &args.config {
+    resolve_config_inputs(args.config.as_ref(), args.artifacts_dir.clone(), cwd)
+}
+
+fn resolve_config_inputs(
+    config_path: Option<&PathBuf>,
+    artifacts_dir_override: Option<PathBuf>,
+    cwd: &Path,
+) -> Result<ResolvedConfig> {
+    let file_config = match config_path {
         Some(path) => {
             let contents = fs::read_to_string(path)
                 .with_context(|| format!("failed to read config file {}", path.display()))?;
@@ -189,9 +217,7 @@ fn resolve_config(args: &CliArgs, cwd: &Path) -> Result<ResolvedConfig> {
         None => FileConfig::default(),
     };
 
-    let artifacts_dir = args
-        .artifacts_dir
-        .clone()
+    let artifacts_dir = artifacts_dir_override
         .or_else(|| env::var_os("T2W_ARTIFACTS_DIR").map(PathBuf::from))
         .or(file_config.artifacts_dir)
         .unwrap_or_else(|| cwd.join(".t2w").join("artifacts"));
@@ -261,13 +287,22 @@ fn collect_workspace_files(cwd: &Path) -> Result<Vec<String>> {
 
         let relative = path.strip_prefix(cwd).unwrap_or(path);
         files.push(relative.display().to_string());
-        if files.len() >= 50 {
-            break;
+    }
+
+    Ok(sort_and_limit_workspace_files(files))
+}
+
+fn sort_and_limit_workspace_files(mut files: Vec<String>) -> Vec<String> {
+    let mut smallest = BinaryHeap::new();
+
+    for file in files.drain(..) {
+        smallest.push(file);
+        if smallest.len() > 50 {
+            smallest.pop();
         }
     }
 
-    files.sort();
-    Ok(files)
+    smallest.into_sorted_vec()
 }
 
 fn should_descend(entry: &DirEntry, root: &Path) -> bool {
@@ -295,6 +330,36 @@ fn build_provider(kind: ProviderKind, config: &ResolvedConfig) -> Result<Box<dyn
         ProviderKind::Mock => Ok(Box::new(
             MockProvider::new(default_mock_chunks()).with_delay(config.mock_chunk_delay_ms),
         )),
+    }
+}
+
+fn build_cli_artifact_shell_context(
+    args: &CliArgs,
+    stdin: &str,
+    config: &ResolvedConfig,
+) -> ArtifactShellContext {
+    ArtifactShellContext::new(
+        artifact_title_from_instruction(&args.instruction),
+        args.instruction.clone(),
+        stdin.to_string(),
+        "Artifact Console",
+        "Default CLI artifact shell with prompt, data, and run controls.",
+        provider_label(args.provider),
+        model_label(args.provider, config),
+    )
+}
+
+fn provider_label(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Mock => "mock",
+    }
+}
+
+fn model_label(kind: ProviderKind, config: &ResolvedConfig) -> String {
+    match kind {
+        ProviderKind::Anthropic => config.anthropic_model.clone(),
+        ProviderKind::Mock => "mock-model".to_string(),
     }
 }
 
@@ -434,6 +499,20 @@ mod tests {
         let files = super::collect_workspace_files(temp.path()).unwrap();
 
         assert_eq!(files, vec!["src\\main.rs"]);
+    }
+
+    #[test]
+    fn sort_and_limit_workspace_files_returns_lexicographically_smallest_50() {
+        let files = (0..60)
+            .rev()
+            .map(|index| format!("file-{index:02}.txt"))
+            .collect::<Vec<_>>();
+
+        let files = super::sort_and_limit_workspace_files(files);
+
+        assert_eq!(files.len(), 50);
+        assert_eq!(files.first().map(String::as_str), Some("file-00.txt"));
+        assert_eq!(files.last().map(String::as_str), Some("file-49.txt"));
     }
 
     #[tokio::test]

@@ -147,7 +147,8 @@ impl AnthropicSseDecoder {
 
         match std::str::from_utf8(&self.pending_bytes) {
             Ok(valid) => {
-                self.buffer.push_str(&valid.replace("\r\n", "\n"));
+                self.buffer.push_str(valid);
+                normalize_sse_newlines_in_place(&mut self.buffer);
                 self.pending_bytes.clear();
             }
             Err(error) => {
@@ -155,7 +156,8 @@ impl AnthropicSseDecoder {
                 if valid_up_to > 0 {
                     let valid = std::str::from_utf8(&self.pending_bytes[..valid_up_to])
                         .expect("valid UTF-8 prefix");
-                    self.buffer.push_str(&valid.replace("\r\n", "\n"));
+                    self.buffer.push_str(valid);
+                    normalize_sse_newlines_in_place(&mut self.buffer);
                     self.pending_bytes.drain(..valid_up_to);
                 }
 
@@ -171,7 +173,8 @@ impl AnthropicSseDecoder {
     }
 
     pub fn push(&mut self, fragment: &str) -> Result<Vec<String>, ProviderError> {
-        self.buffer.push_str(&fragment.replace("\r\n", "\n"));
+        self.buffer.push_str(fragment);
+        normalize_sse_newlines_in_place(&mut self.buffer);
         self.drain_events()
     }
 
@@ -194,23 +197,19 @@ impl AnthropicSseDecoder {
 #[derive(Debug, Default)]
 pub struct HtmlStreamSanitizer {
     started: bool,
+    closed_html: bool,
     prefix: String,
     html: String,
+    pending_fence: String,
 }
 
 impl HtmlStreamSanitizer {
     pub fn push(&mut self, fragment: &str) -> Option<String> {
-        let normalized = strip_fence_tokens(fragment);
-
         if self.started {
-            if normalized.is_empty() {
-                return None;
-            }
-            self.html.push_str(&normalized);
-            return Some(normalized);
+            return self.push_started_fragment(fragment);
         }
 
-        self.prefix.push_str(&normalized);
+        self.prefix.push_str(fragment);
         let lower = self.prefix.to_ascii_lowercase();
         let start_index = lower
             .find("<!doctype")
@@ -219,13 +218,68 @@ impl HtmlStreamSanitizer {
         let html = self.prefix[start_index..].to_string();
         self.started = true;
         self.prefix.clear();
-        self.html.push_str(&html);
-        Some(html)
+        self.push_started_fragment(&html)
     }
 
     pub fn finish(&self) -> String {
-        strip_fence_tokens(&self.html).trim().to_string()
+        self.html.trim().to_string()
     }
+
+    fn push_started_fragment(&mut self, fragment: &str) -> Option<String> {
+        let mut candidate = std::mem::take(&mut self.pending_fence);
+        candidate.push_str(fragment);
+
+        let (clean, pending_fence) = if self.closed_html {
+            strip_or_hold_trailing_fence(&candidate)
+        } else if let Some(end_index) = find_html_close_end(&candidate) {
+            self.closed_html = true;
+            let mut clean = candidate[..end_index].to_string();
+            let (tail, pending_fence) = strip_or_hold_trailing_fence(&candidate[end_index..]);
+            clean.push_str(&tail);
+            (clean, pending_fence)
+        } else {
+            (candidate, String::new())
+        };
+
+        self.pending_fence = pending_fence;
+        if clean.is_empty() {
+            return None;
+        }
+
+        self.html.push_str(&clean);
+        Some(clean)
+    }
+}
+
+fn normalize_sse_newlines_in_place(buffer: &mut String) {
+    let normalized = buffer.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized != *buffer {
+        *buffer = normalized;
+    }
+}
+
+fn find_html_close_end(value: &str) -> Option<usize> {
+    value
+        .to_ascii_lowercase()
+        .rfind("</html>")
+        .map(|index| index + "</html>".len())
+}
+
+fn strip_or_hold_trailing_fence(value: &str) -> (String, String) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return (String::new(), String::new());
+    }
+
+    if trimmed.chars().all(|ch| ch == '`') {
+        return match trimmed.len() {
+            1 | 2 => (String::new(), value.to_string()),
+            3 => (String::new(), String::new()),
+            _ => (value.to_string(), String::new()),
+        };
+    }
+
+    (value.to_string(), String::new())
 }
 
 fn parse_sse_event(event: &str) -> Result<Option<String>, ProviderError> {
@@ -256,13 +310,6 @@ fn parse_sse_event(event: &str) -> Result<Option<String>, ProviderError> {
     }
 
     Ok(None)
-}
-
-fn strip_fence_tokens(value: &str) -> String {
-    value
-        .replace("```html", "")
-        .replace("```HTML", "")
-        .replace("```", "")
 }
 
 #[derive(Debug, Serialize)]
@@ -377,8 +424,54 @@ mod tests {
         );
         assert_eq!(
             sanitizer.push("CTYPE html><html><body>Hi</body></html>\n```"),
-            Some("CTYPE html><html><body>Hi</body></html>\n".to_string())
+            Some("CTYPE html><html><body>Hi</body></html>".to_string())
         );
+        assert_eq!(
+            sanitizer.finish(),
+            "<!DOCTYPE html><html><body>Hi</body></html>"
+        );
+    }
+
+    #[test]
+    fn anthropic_sse_decoder_handles_crlf_split_across_byte_chunks() {
+        let mut decoder = AnthropicSseDecoder::default();
+        let first = b"event: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"<!DOCTYPE html>\"}}\r";
+        let second = b"\n\r\n";
+
+        let no_output = decoder.push_bytes(first).unwrap();
+        let output = decoder.push_bytes(second).unwrap();
+
+        assert!(no_output.is_empty());
+        assert_eq!(output, vec!["<!DOCTYPE html>".to_string()]);
+    }
+
+    #[test]
+    fn html_stream_sanitizer_preserves_literal_code_fences_inside_html() {
+        let mut sanitizer = HtmlStreamSanitizer::default();
+
+        assert_eq!(
+            sanitizer.push("<!DOCTYPE html><html><body><pre>```code```</pre>"),
+            Some("<!DOCTYPE html><html><body><pre>```code```</pre>".to_string())
+        );
+        assert_eq!(
+            sanitizer.push("</body></html>"),
+            Some("</body></html>".to_string())
+        );
+        assert_eq!(
+            sanitizer.finish(),
+            "<!DOCTYPE html><html><body><pre>```code```</pre></body></html>"
+        );
+    }
+
+    #[test]
+    fn html_stream_sanitizer_handles_trailing_fence_split_across_chunks() {
+        let mut sanitizer = HtmlStreamSanitizer::default();
+
+        assert_eq!(
+            sanitizer.push("<!DOCTYPE html><html><body>Hi</body></html>\n`"),
+            Some("<!DOCTYPE html><html><body>Hi</body></html>".to_string())
+        );
+        assert_eq!(sanitizer.push("``"), None);
         assert_eq!(
             sanitizer.finish(),
             "<!DOCTYPE html><html><body>Hi</body></html>"

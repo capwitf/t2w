@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["T"]
-repository = "https://example.com/t2w"
+repository = "https://github.com/capwitf/t2w"
 rust-version = "1.88"
 
 [workspace.dependencies]

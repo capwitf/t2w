@@ -16,6 +16,7 @@ dependencies = [
  "predicates",
  "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
  "time",
  "tokio",
@@ -60,9 +61,11 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -35,6 +35,10 @@ async fn mock_cli_emits_live_url_streams_artifact_and_writes_snapshot() {
         .unwrap();
     assert!(artifact_body.contains("Mock Artifact"));
     assert!(artifact_body.contains("Streaming preview is active."));
+    assert!(artifact_body.contains("data-t2w-artifact-shell=\"default\""));
+    assert!(artifact_body.contains("User Instruction"));
+    assert!(artifact_body.contains("build a mock error dashboard"));
+    assert!(artifact_body.contains("GET /health 500"));
 
     let status = timeout(Duration::from_secs(5), child.wait())
         .await
@@ -47,7 +51,10 @@ async fn mock_cli_emits_live_url_streams_artifact_and_writes_snapshot() {
     assert_eq!(snapshots.len(), 1);
     let snapshot_html = fs::read_to_string(&snapshots[0]).unwrap();
     assert!(snapshot_html.starts_with("<!DOCTYPE html>"));
+    assert!(snapshot_html.contains("data-t2w-artifact-shell=\"default\""));
     assert!(snapshot_html.contains("Mock Artifact"));
+    assert!(snapshot_html.contains("build a mock error dashboard"));
+    assert!(snapshot_html.contains("GET /ready 503"));
     assert!(!snapshot_html.contains("```"));
     assert!(!snapshot_html.contains("Here is your artifact"));
 }

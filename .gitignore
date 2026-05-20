@@ -1,3 +1,6 @@
 /target
 /.t2w
+/.omx/
+/.playwright-mcp/
 /rustup-init.exe
+/desktop.ini
