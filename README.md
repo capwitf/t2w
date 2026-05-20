@@ -1,31 +1,35 @@
 [English](README.md) | [中文](README_zh.md)
 
-# t2w
-
-`t2w` is a Rust-first local artifact engine that turns terminal input into live HTML. It gives you a one-shot CLI for fast generation and a local Studio shell for inspecting prompts, data, run state, and final artifacts.
+<div align="center">
+  <h1>t2w</h1>
+  <p>Turn terminal input into a local HTML artifact.</p>
+  <p>
+    <a href="https://github.com/capwitf/t2w/releases/latest">Download</a>
+    ·
+    <a href="#usage">Usage</a>
+    ·
+    <a href="#roadmap">Roadmap</a>
+  </p>
+</div>
 
 ## Preview
 
-![t2w artifact shell](docs/assets/t2w-artifact-shell.png)
+| Artifact Shell | Studio |
+| --- | --- |
+| ![Artifact Shell](docs/assets/t2w-artifact-shell.png) | ![Studio](docs/assets/t2w-studio-shell.png) |
 
-The default artifact shell wraps generated HTML with a local workbench: prompt context, data view, theme controls, run status, fullscreen preview, and HTML export.
+## Features
 
-![t2w Studio shell](docs/assets/t2w-studio-shell.png)
-
-Studio runs as a local same-origin web app served by `t2w-studio`; no Node build, CDN, external fonts, or hosted service is required.
-
-## Highlights
-
-- Stream `stdin + instruction` into a live browser preview.
-- Save the final result as a self-contained `.html` artifact.
-- Run a local Studio UI with sessions, templates, skills, active-run status, cancel, preview, and download.
-- Use a deterministic `mock` provider for smoke tests and an `anthropic` provider for real generation.
-- Discover local `SKILL.md` files and inject relevant skill instructions into prompts.
-- Ship embedded Studio assets from the Rust server, so releases are just portable binaries.
+- CLI first: pipe text in, get an HTML page out.
+- Live preview while the provider is streaming.
+- Local Studio for editing sessions, checking run state, previewing output, and downloading HTML.
+- Two providers today: `mock` for local tests, `anthropic` for real generation.
+- Local `SKILL.md` discovery and prompt injection.
+- No frontend build step. Studio assets are embedded in the Rust server.
 
 ## Install
 
-The v1.x distribution is intentionally lightweight: download an archive, unpack it, and run the binaries. Native installers such as `.msi`, `.pkg`, `.deb`, and AppImage are planned after the CLI and Studio contracts stabilize.
+Download the latest package from [Releases](https://github.com/capwitf/t2w/releases/latest).
 
 | Platform | Package |
 | --- | --- |
@@ -33,8 +37,6 @@ The v1.x distribution is intentionally lightweight: download an archive, unpack 
 | macOS Apple Silicon | [t2w-macos-aarch64.tar.gz](https://github.com/capwitf/t2w/releases/latest/download/t2w-macos-aarch64.tar.gz) |
 | macOS Intel | [t2w-macos-x86_64.tar.gz](https://github.com/capwitf/t2w/releases/latest/download/t2w-macos-x86_64.tar.gz) |
 | Linux x64 | [t2w-linux-x86_64.tar.gz](https://github.com/capwitf/t2w/releases/latest/download/t2w-linux-x86_64.tar.gz) |
-
-Each release also includes `.sha256` checksum files.
 
 Windows:
 
@@ -55,48 +57,35 @@ chmod +x t2w t2w-studio
 ./t2w-studio --port 3000
 ```
 
-Use the matching archive name on macOS, for example `t2w-macos-aarch64.tar.gz` or `t2w-macos-x86_64.tar.gz`.
+Open Studio at [http://127.0.0.1:3000/](http://127.0.0.1:3000/).
 
-Then open [http://127.0.0.1:3000/](http://127.0.0.1:3000/).
+## Usage
 
-## Quick Start From Source
-
-Build the workspace:
-
-```powershell
-cargo build
-```
-
-Run the CLI without installing:
+Run from source:
 
 ```powershell
 cargo run -p agent-cli --bin t2w -- --provider mock --no-open "build a clean operations dashboard as HTML"
 ```
 
-Install the binaries locally:
-
-```powershell
-cargo install --path crates/agent-cli --bin t2w --bin t2w-studio --force
-```
-
-Run Studio from source:
+Start Studio:
 
 ```powershell
 cargo run -p agent-cli --bin t2w-studio -- --port 3000
 ```
 
-## Anthropic Provider
-
-For real generation, set an Anthropic key and model:
+Install from source:
 
 ```powershell
-$env:T2W_ANTHROPIC_API_KEY = "your-key"
-$env:T2W_ANTHROPIC_MODEL = "claude-sonnet-4-5"
+cargo install --path crates/agent-cli --bin t2w --bin t2w-studio --force
 ```
 
-Mock mode does not require credentials.
+Pipe a file into the CLI:
 
-## CLI Reference
+```powershell
+Get-Content .\access.log | t2w "build an incident dashboard from these logs"
+```
+
+CLI options:
 
 ```text
 t2w "<instruction>"
@@ -109,98 +98,70 @@ t2w "<instruction>"
   --no-snapshot
 ```
 
-Pipe data through stdin:
+Snapshots are written to `.t2w/artifacts/` by default.
+
+## Provider And Cost
+
+Use `mock` for local checks. It does not call a model and does not spend tokens.
+
+Real generation uses Anthropic:
 
 ```powershell
-Get-Content .\access.log | t2w "build an incident dashboard from these logs"
+$env:T2W_ANTHROPIC_API_KEY = "your-key"
+$env:T2W_ANTHROPIC_MODEL = "claude-sonnet-4-5"
 ```
 
-Default snapshot output is written under `.t2w/artifacts/` unless `--no-snapshot` is used.
-
-## Studio Notes
-
-- `GET /` serves the Studio shell.
-- `GET /studio.css` and `GET /studio.js` serve embedded same-origin assets.
-- API routes live under `/sessions`, `/runs`, `/templates`, and `/skills`.
-- v1 allows one active run at a time; a second concurrent run returns `409 active_run_exists`.
-- Studio sessions and runs are in-memory process state. Refreshing the page reloads from the current process; restarting the server clears them.
+Token use depends on the instruction, stdin content, selected skills, and generated HTML size.
 
 ## Skills
 
-v1 supports local skill discovery and prompt injection.
+t2w can read local `SKILL.md` files and add matching guidance to the prompt.
 
-- Default search roots:
-  - `./skills`
-  - `./.t2w/skills`
-- Extra roots can be added with `--skills-dir`.
-- Explicit activation uses `--skill <name>`.
-- Automatic activation order:
-  - explicit name
-  - `trigger` match
-  - `description` token overlap
+Default roots:
 
-Example skill: [`examples/skills/log-dashboard/SKILL.md`](examples/skills/log-dashboard/SKILL.md)
+- `./skills`
+- `./.t2w/skills`
 
-## Releases
+Example: [`examples/skills/log-dashboard/SKILL.md`](examples/skills/log-dashboard/SKILL.md)
 
-Cross-platform packages are built by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+## Release
 
-Create a tagged release:
+Release packages are built by [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow builds and uploads:
-
-- `t2w-windows-x86_64.zip`
-- `t2w-macos-aarch64.tar.gz`
-- `t2w-macos-x86_64.tar.gz`
-- `t2w-linux-x86_64.tar.gz`
-- matching `.sha256` files
+The workflow uploads Windows, macOS, and Linux archives with `.sha256` files.
 
 ## Roadmap
 
-### v0.1.x - Portable Release Line
+### v0.1.x
 
-- Keep the CLI and Studio v1 contracts stable.
-- Publish portable Windows, macOS, and Linux archives.
-- Improve README screenshots, examples, and release instructions.
+- Keep the CLI and Studio v1 shape stable.
+- Publish portable packages for Windows, macOS, and Linux.
+- Keep examples and screenshots current.
 
 ### v0.2 - Reinforcement Formula
 
-The next product focus is the "reinforcement formula": a repeatable generation recipe that makes artifact quality less dependent on a single raw prompt.
+Make generation less dependent on one raw prompt.
 
-Planned pieces:
+- prompt formula: role, input, output contract, visual rules
+- data formula: normalize stdin before generation
+- theme formula: stable layout, density, typography, and color choices
+- run formula: score output, find gaps, repair weak HTML
+- presets for logs, tables, dashboards, reports, and inspectors
 
-- prompt formula: instruction, role, data contract, output contract, and visual constraints
-- data formula: normalize stdin into typed context blocks before provider calls
-- theme formula: map domain intent to stable layout, typography, density, and color decisions
-- run formula: score generated HTML, detect missing requirements, and repair weak outputs
-- formula presets for logs, tables, dashboards, reports, and inspectors
+### Later
 
-### v0.3 - Studio Persistence And Providers
-
-- Persist Studio sessions and run history across restarts.
-- Add more providers beyond `mock` and `anthropic`.
-- Add provider-level model presets and safer credential handling.
-
-### v0.4 - Skills And TUI
-
-- Expand `SKILL.md` workflows beyond local discovery.
-- Add installable skill packs and sandbox boundaries.
-- Build the real TUI layer next to the browser Studio shell.
-
-### v1.0 - Stable Local Artifact Workbench
-
-- Stable CLI, Studio API, artifact shell, and release packages.
-- Signed or native installers after the portable package lane proves itself.
-- Strong docs, examples, screenshots, and upgrade notes.
+- Persistent Studio sessions.
+- More providers and model presets.
+- Skill packs and sandbox boundaries.
+- Real TUI next to the browser Studio.
+- Native installers after the portable packages settle.
 
 ## Development
-
-Quality gates:
 
 ```powershell
 cargo fmt --all --check
@@ -209,22 +170,15 @@ cargo test --workspace
 cargo build --release
 ```
 
-Optional targeted checks:
+## Contact
 
-```powershell
-cargo test -p agent-cli --test live_preview
-cargo test -p agent-cli --test studio_server
-```
-
-Or via `xtask`:
-
-```powershell
-cargo run -p xtask -- fmt
-cargo run -p xtask -- clippy
-cargo run -p xtask -- test
-cargo run -p xtask -- smoke
-```
+- Author: [capwitf](https://github.com/capwitf)
+- Email: [cbq6180@gmail.com](mailto:cbq6180@gmail.com)
 
 ## License
 
-See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
+
+<p align="center">
+  <img src="docs/assets/capwitf.png" alt="capwitf" width="180">
+</p>
