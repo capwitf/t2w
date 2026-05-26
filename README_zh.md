@@ -1,10 +1,26 @@
 [English](README.md) | [中文](README_zh.md)
 
-# t2w
+<p align="center">
+  <img src="docs/assets/t2w-logo.png" alt="t2w logo" width="160">
+</p>
 
-把终端输入变成可预览、可检查、可保存的本地 HTML artifact。
+<h1 align="center">t2w</h1>
 
-`t2w` 是一个 Rust workspace，提供两个入口：一次性 CLI 和本地浏览器 Studio。它会把生成中的 HTML 流式送进实时预览，把最终结果包进 artifact shell，并可保存为自包含的本地 HTML 文件。
+<p align="center">
+  把终端输入转换成可本地查看、可检查的 HTML artifact。
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a>
+  ·
+  <a href="#studio">Studio</a>
+  ·
+  <a href="#下载">下载</a>
+  ·
+  <a href="#faq">FAQ</a>
+</p>
+
+`t2w` 是一个 Rust CLI 和本地浏览器 Studio。它可以把 prompt、日志、表格、笔记和 stdin 数据转换成自包含 HTML 页面。生成过程会流式进入实时预览，完成后会包进 artifact shell。默认路径是本地的，不需要 key，也不消耗 token。
 
 ## 预览
 
@@ -12,17 +28,15 @@
 | --- | --- |
 | ![Artifact Shell](docs/assets/t2w-artifact-shell.png) | ![Studio](docs/assets/t2w-studio-shell.png) |
 
-## 特性
+## 功能亮点
 
-- 本地优先的 CLI：把 `stdin + instruction` 转成 HTML。
-- provider 流式输出时实时预览。
-- Studio 支持 session、template、skill、run 状态、取消、预览、源码查看和下载。
-- session 和 run 历史默认持久化到 `.t2w/studio-state.json`。
-- 强化公式视图：展示 Prompt、Data、Theme、Run 四个阶段。这个视图在本地渲染，本身不增加 token 消耗。
-- 默认使用确定性的 `mock` provider，不需要 API key，不消耗 token。
-- Anthropic provider 只有显式开启后才可用。
-- 从 `./skills`、`./.t2w/skills` 或 `--skills-dir` 发现本地 `SKILL.md` 并注入 prompt。
-- Studio 资源嵌入 Rust server；不需要 Node、前端构建、CDN、远程字体或托管服务。
+- **默认本地运行**：默认 provider 是 `mock`，smoke test 和 Studio 检查不需要 key，也不消耗 token。
+- **实时 HTML 预览**：生成中的 chunk 会流式进入浏览器页面。
+- **Studio 工作区**：管理 session、template、skill、运行状态、取消、源码视图和下载。
+- **运行记录持久化**：Studio 会把 session 和已完成 run 记录保存到 `.t2w/studio-state.json`。
+- **Reinforcement Formula**：Prompt、Data、Theme、Run 阶段在 Studio 和 artifact shell 中本地渲染。
+- **Skill 感知 prompt**：可以显式选择本地 `SKILL.md`，也可以从配置目录自动发现。
+- **便携发布包**：release archive 内含两个二进制文件、README、license 和 bundled assets。
 
 ## 快速开始
 
@@ -32,15 +46,15 @@
 cargo run -p agent-cli --bin t2w -- --provider mock --no-open "build a clean operations dashboard as HTML"
 ```
 
-从源码启动 Studio：
+启动 Studio：
 
 ```powershell
 cargo run -p agent-cli --bin t2w-studio -- --port 3000
 ```
 
-然后打开 [http://127.0.0.1:3000/](http://127.0.0.1:3000/)。
+打开 [http://127.0.0.1:3000/](http://127.0.0.1:3000/)。
 
-从源码安装两个二进制：
+把两个二进制安装到本机：
 
 ```powershell
 cargo install --path crates/agent-cli --bin t2w --bin t2w-studio --force
@@ -48,10 +62,22 @@ cargo install --path crates/agent-cli --bin t2w --bin t2w-studio --force
 
 ## CLI
 
-把文件传给 prompt：
+用普通指令生成 artifact：
+
+```powershell
+t2w --provider mock --no-open "build a compact release checklist as HTML"
+```
+
+把数据通过管道传入：
 
 ```powershell
 Get-Content .\access.log | t2w "build an incident dashboard from these logs"
+```
+
+使用本地 skill：
+
+```powershell
+t2w --skill log-dashboard "build a dashboard from these logs"
 ```
 
 常用参数：
@@ -67,17 +93,17 @@ t2w "<instruction>"
   --no-snapshot
 ```
 
-默认 snapshot 输出到 `.t2w/artifacts/`。可用 `T2W_ARTIFACTS_DIR` 或 `--artifacts-dir` 修改输出目录。
+未使用 `--no-snapshot` 时，snapshot 默认写入 `.t2w/artifacts/`。
 
 ## Studio
 
-Studio 是由 `t2w-studio` 启动的本地同源 Web 应用。
+Studio 由 `t2w-studio` 在本地提供服务；不需要前端构建，也不依赖托管服务。
 
 ```powershell
 t2w-studio --port 3000
 ```
 
-常用参数：
+参数：
 
 ```text
 t2w-studio
@@ -89,13 +115,20 @@ t2w-studio
   --sessions-file <path>
 ```
 
-Studio 默认把 session 和已完成 run 历史保存到 `.t2w/studio-state.json`。如果状态文件损坏，Studio 会把原文件保留为 `.corrupt` 文件，并用空状态继续启动。
+默认状态和输出路径：
 
-## Provider 和费用
+| 路径 | 用途 |
+| --- | --- |
+| `.t2w/studio-state.json` | Studio session 和 run 历史。 |
+| `.t2w/artifacts/` | CLI 和 Studio snapshot。 |
 
-默认 provider 是 `mock`。它是本地、确定性的，不会调用模型。
+如果 Studio 状态文件损坏，t2w 会把坏文件保留为 `.corrupt`，然后用空状态启动。
 
-Anthropic 生成是显式开启的。你必须开启开关，并选择 Anthropic provider：
+## Provider 和成本
+
+`mock` 是默认 provider。它是确定性的、本地的，不会调用模型。
+
+Anthropic 生成是可选能力。需要先打开启用开关并设置 key，然后显式选择 Anthropic provider：
 
 ```powershell
 $env:T2W_ENABLE_ANTHROPIC = "1"
@@ -104,7 +137,7 @@ $env:T2W_ANTHROPIC_MODEL = "claude-sonnet-4-5"
 t2w --provider anthropic "build a clean operations dashboard as HTML"
 ```
 
-等价配置项：
+等价配置文件：
 
 ```toml
 anthropic_enabled = true
@@ -113,27 +146,32 @@ anthropic_model = "claude-sonnet-4-5"
 mock_chunk_delay_ms = 0
 ```
 
-只有 provider 调用会消耗 token。本地 Studio 渲染、mock run、预览、snapshot、强化公式展示都不消耗 token。
+环境变量：
+
+| 名称 | 用途 |
+| --- | --- |
+| `T2W_ARTIFACTS_DIR` | 覆盖 snapshot 输出目录。 |
+| `T2W_ENABLE_ANTHROPIC` | 设置为 `1`、`true`、`yes` 或 `on` 时启用 Anthropic。 |
+| `T2W_ANTHROPIC_ENABLED` | 备用 Anthropic 启用开关。 |
+| `T2W_ANTHROPIC_API_KEY` | Anthropic API key。 |
+| `T2W_ANTHROPIC_MODEL` | Anthropic model 名称。 |
+| `T2W_MOCK_CHUNK_DELAY_MS` | 为流式测试延迟 mock chunk。 |
+
+只有 provider 调用会消耗 token。Mock 运行、Studio 渲染、预览、snapshot、Reinforcement Formula 展示都在本地完成。
 
 ## Skills
 
-Skill 是本地 `SKILL.md` 文件。t2w 会从这些位置发现：
+t2w 会从这些位置发现本地 `SKILL.md`：
 
 - `./skills`
 - `./.t2w/skills`
 - 通过 `--skills-dir` 传入的额外目录
 
-显式启用：
-
-```powershell
-t2w --skill log-dashboard "build a dashboard from these logs"
-```
-
-示例：[`examples/skills/log-dashboard/SKILL.md`](examples/skills/log-dashboard/SKILL.md)
+示例 skill：[`examples/skills/log-dashboard/SKILL.md`](examples/skills/log-dashboard/SKILL.md)
 
 ## 支持系统
 
-当前 release workflow 会为这些系统构建便携包：
+release workflow 会构建这些便携 archive：
 
 | 系统 | 架构 | 包格式 |
 | --- | --- | --- |
@@ -142,11 +180,11 @@ t2w --skill log-dashboard "build a dashboard from these logs"
 | macOS | Intel / x86_64 | `.tar.gz` |
 | Linux | x86_64 | `.tar.gz` |
 
-项目目前还没有 `.msi`、`.pkg`、`.deb` 或 AppImage 这类原生安装器。当前发布形态是便携压缩包，里面包含 `t2w`、`t2w-studio`、README、LICENSE 和内置资源。
+t2w 暂时不提供原生 `.msi`、`.pkg`、`.deb` 或 AppImage 安装器。当前 release 是便携 archive。
 
 ## 下载
 
-GitHub Releases 提供便携包。
+从 [GitHub Releases](https://github.com/capwitf/t2w/releases/latest) 下载最新便携包。
 
 | 平台 | 包 |
 | --- | --- |
@@ -154,6 +192,8 @@ GitHub Releases 提供便携包。
 | macOS Apple Silicon | [t2w-macos-aarch64.tar.gz](https://github.com/capwitf/t2w/releases/latest/download/t2w-macos-aarch64.tar.gz) |
 | macOS Intel | [t2w-macos-x86_64.tar.gz](https://github.com/capwitf/t2w/releases/latest/download/t2w-macos-x86_64.tar.gz) |
 | Linux x64 | [t2w-linux-x86_64.tar.gz](https://github.com/capwitf/t2w/releases/latest/download/t2w-linux-x86_64.tar.gz) |
+
+每个 release 都包含对应的 `.sha256` 校验文件。
 
 Windows：
 
@@ -174,8 +214,6 @@ chmod +x t2w t2w-studio
 ./t2w-studio --port 3000
 ```
 
-每个 release 都包含对应的 `.sha256` 校验文件。
-
 ## 开发
 
 ```powershell
@@ -185,21 +223,51 @@ cargo test --workspace
 cargo build --release
 ```
 
-发行包由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 构建：
+release 包由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 构建：
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-## 路线图
+## FAQ
 
-- 稳定 CLI、Studio API、artifact shell 和 release archive 合约。
-- 继续把强化公式扩展成 template-specific 的生成配方。
-- 增加更多 provider 和模型预设，但保持本地优先的默认行为。
-- 扩展可安装 skill packs 和 sandbox 边界。
-- 在浏览器 Studio 之外补齐真正的 TUI。
+### t2w 默认会消耗 token 吗？
+
+不会。默认 `mock` provider 是本地且确定性的。
+
+### 什么时候需要 API key？
+
+只有在你显式启用 Anthropic 并选择 `anthropic` provider 时才需要。
+
+### Reinforcement Formula 会发给模型吗？
+
+不会。它目前只在 Studio 和 artifact shell 中本地渲染，除非未来明确把它接入 provider prompt。
+
+### smoke test 里的 `t2w-studio` 是什么？
+
+`t2w-studio` 是本地浏览器 Studio 二进制。smoke test 会启动它，用来验证 app shell、API、流式预览和 artifact 路由，不需要模型 key。
+
+### 生成文件放在哪里？
+
+snapshot 默认进入 `.t2w/artifacts/`。Studio 状态默认进入 `.t2w/studio-state.json`。
+
+## Roadmap
+
+- 稳定 CLI、Studio API、artifact shell 和 release archive contract。
+- 扩展面向日志、表格、dashboard、report 和 inspector 的 Reinforcement Formula preset。
+- 增加更多 provider 和 model preset，同时保持 local-first 默认路径。
+- 增加可安装 skill pack，并强化 sandbox 边界。
+- 在浏览器 Studio 之外补上真正的 TUI 界面。
+
+## 联系
+
+Email: [capwitf@outlook.com](mailto:capwitf@outlook.com)
 
 ## License
 
-MIT. 见 [LICENSE](LICENSE)。
+MIT. See [LICENSE](LICENSE).
+
+<p align="center">
+  <img src="docs/assets/capwitf.png" alt="Capwitf signature" width="240">
+</p>
