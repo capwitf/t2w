@@ -1,4 +1,5 @@
 /target
+/dist/
 /.t2w
 /.omx/
 /.playwright-mcp/

@@ -364,7 +364,7 @@ button:disabled {
 
 .tab-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -395,6 +395,21 @@ button:disabled {
 .field-label {
   font-size: 13px;
   font-weight: 600;
+}
+
+.field-heading {
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+}
+
+.field-heading .field-label,
+.field-heading .field-hint {
+  margin: 0;
+}
+
+.field-heading .field-hint {
+  white-space: nowrap;
 }
 
 .text-input,
@@ -467,6 +482,60 @@ button:disabled {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.4;
+}
+
+.formula-group {
+  margin-top: 16px;
+}
+
+.formula-list {
+  display: grid;
+  gap: 10px;
+}
+
+.formula-step {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.formula-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.formula-step-head span {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.formula-step-head strong {
+  font-size: 13px;
+  text-align: right;
+}
+
+.formula-step p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.formula-step ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .compact-group {
@@ -589,7 +658,35 @@ body[data-panel-open="false"] .config-panel {
     min-height: 280px;
   }
 
-  .tab-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+}
+
+.html-source {
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 480px;
+  overflow: auto;
+}
+
+.live-preview-wrap {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #ffffff;
+  height: 320px;
+}
+
+#live-mini-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #ffffff;
 }

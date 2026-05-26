@@ -127,6 +127,12 @@
           <button id="tab-data" class="tab-button" type="button" role="tab" aria-selected="false" data-tab="data">
             Data
           </button>
+          <button id="tab-live" class="tab-button" type="button" role="tab" aria-selected="false" data-tab="live">
+            Live
+          </button>
+          <button id="tab-html" class="tab-button" type="button" role="tab" aria-selected="false" data-tab="html">
+            HTML
+          </button>
           <button id="tab-theme" class="tab-button" type="button" role="tab" aria-selected="false" data-tab="theme">
             Theme
           </button>
@@ -157,17 +163,38 @@
             <textarea id="stdin-input" class="text-area" rows="18"></textarea>
           </section>
 
+          <section class="tab-panel" data-panel="live" role="tabpanel" aria-labelledby="tab-live">
+            <div class="live-preview-wrap">
+              <iframe id="live-mini-frame" title="Live mini preview" sandbox="allow-scripts"></iframe>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-panel="html" role="tabpanel" aria-labelledby="tab-html">
+            <div class="field-heading">
+              <span class="field-label">HTML Source</span>
+              <button id="copy-html-button" class="ghost-button" type="button">Copy</button>
+            </div>
+            <pre id="html-source-view" class="html-source"></pre>
+          </section>
+
           <section class="tab-panel" data-panel="theme" role="tabpanel" aria-labelledby="tab-theme">
             <label class="field-label" for="template-select">Template</label>
             <select id="template-select" class="text-input"></select>
             <p id="template-description" class="subtle-copy"></p>
+            <div class="field-group formula-group">
+              <div class="field-heading">
+                <span class="field-label">Reinforcement Formula</span>
+                <span class="field-hint">Prompt / Data / Theme / Run</span>
+              </div>
+              <div id="formula-list" class="formula-list"></div>
+            </div>
           </section>
 
           <section class="tab-panel" data-panel="run" role="tabpanel" aria-labelledby="tab-run">
             <label class="field-label" for="provider-select">Provider</label>
             <select id="provider-select" class="text-input">
-              <option value="mock">mock</option>
-              <option value="anthropic">anthropic</option>
+              <option value="mock">mock (local, no key)</option>
+              <option value="anthropic">anthropic (opt-in + key)</option>
             </select>
 
             <label class="field-label" for="model-input">Model</label>

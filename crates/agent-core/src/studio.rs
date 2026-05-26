@@ -56,6 +56,14 @@ pub enum RunPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormulaStep {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StudioSession {
     pub id: String,
     pub title: String,
@@ -106,6 +114,7 @@ pub struct TemplateDescriptor {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub formula: Vec<FormulaStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,21 +129,74 @@ pub fn default_templates() -> Vec<TemplateDescriptor> {
             id: "table-explorer".to_string(),
             name: "Table Explorer".to_string(),
             description: "High-density structured table artifact".to_string(),
+            formula: default_reinforcement_formula(),
         },
         TemplateDescriptor {
             id: "incident-summary".to_string(),
             name: "Incident Summary".to_string(),
             description: "Narrative incident report with key status callouts".to_string(),
+            formula: default_reinforcement_formula(),
         },
         TemplateDescriptor {
             id: "kpi-dashboard".to_string(),
             name: "KPI Dashboard".to_string(),
             description: "Metric-forward dashboard for compact operational summaries".to_string(),
+            formula: default_reinforcement_formula(),
         },
         TemplateDescriptor {
             id: "timeline-report".to_string(),
             name: "Timeline Report".to_string(),
             description: "Chronological report optimized for event progression".to_string(),
+            formula: default_reinforcement_formula(),
+        },
+    ]
+}
+
+pub fn default_reinforcement_formula() -> Vec<FormulaStep> {
+    vec![
+        FormulaStep {
+            id: "prompt".to_string(),
+            title: "Prompt Formula".to_string(),
+            description: "Stabilize role, input shape, and the output contract before generation."
+                .to_string(),
+            rules: vec![
+                "State the role and the exact artifact type.".to_string(),
+                "Repeat the output contract in one short line.".to_string(),
+                "Keep visual rules in the prompt body, not in ad hoc follow-up text.".to_string(),
+            ],
+        },
+        FormulaStep {
+            id: "data".to_string(),
+            title: "Data Formula".to_string(),
+            description: "Normalize stdin and surface only the data that matters to the artifact."
+                .to_string(),
+            rules: vec![
+                "Trim noise and keep the smallest useful sample.".to_string(),
+                "Preserve identifiers, counts, and timestamps when they carry meaning.".to_string(),
+                "Prefer structured excerpts over raw blobs when both exist.".to_string(),
+            ],
+        },
+        FormulaStep {
+            id: "theme".to_string(),
+            title: "Theme Formula".to_string(),
+            description: "Use a stable layout, density, typography, and accent system.".to_string(),
+            rules: vec![
+                "Keep the preview legible at the first glance.".to_string(),
+                "Use one accent color for active state and keep the rest restrained.".to_string(),
+                "Maintain a fixed shell around the artifact canvas.".to_string(),
+            ],
+        },
+        FormulaStep {
+            id: "run".to_string(),
+            title: "Run Formula".to_string(),
+            description: "Score the output, spot weak sections, and repair the HTML before finish."
+                .to_string(),
+            rules: vec![
+                "Render streaming output incrementally and validate the final HTML shell."
+                    .to_string(),
+                "Flag gaps in content density, hierarchy, or contrast.".to_string(),
+                "Finish with a snapshot that can be reopened locally.".to_string(),
+            ],
         },
     ]
 }
@@ -143,7 +205,7 @@ pub fn default_templates() -> Vec<TemplateDescriptor> {
 mod tests {
     use super::{
         RunOptions, RunPhase, RunRequest, RunStatus, SessionInput, SessionStatus, StudioSession,
-        default_templates,
+        default_reinforcement_formula, default_templates,
     };
 
     #[test]
@@ -193,5 +255,41 @@ mod tests {
         assert!(templates.iter().any(|template| {
             template.id == "table-explorer" && template.name == "Table Explorer"
         }));
+    }
+
+    #[test]
+    fn default_templates_include_reinforcement_formula() {
+        let templates = default_templates();
+        let template = templates
+            .iter()
+            .find(|template| template.id == "table-explorer")
+            .expect("table explorer template");
+        let stage_ids = template
+            .formula
+            .iter()
+            .map(|stage| stage.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(stage_ids, vec!["prompt", "data", "theme", "run"]);
+        assert!(template.formula.iter().all(|stage| !stage.rules.is_empty()));
+    }
+
+    #[test]
+    fn default_reinforcement_formula_has_four_stages() {
+        let formula = default_reinforcement_formula();
+        let titles = formula
+            .iter()
+            .map(|stage| stage.title.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            titles,
+            vec![
+                "Prompt Formula",
+                "Data Formula",
+                "Theme Formula",
+                "Run Formula"
+            ]
+        );
     }
 }

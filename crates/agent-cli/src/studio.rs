@@ -9,7 +9,9 @@ use agent_core::artifact_shell::{
 };
 use agent_core::prompt::{ContextSnapshot, InjectedSkill, build_prompt_request};
 use agent_core::provider::{AnthropicConfig, AnthropicProvider, LlmProvider, MockProvider};
-use agent_core::studio::{RunRequest, SkillDescriptor, default_templates};
+use agent_core::studio::{
+    RunRequest, SkillDescriptor, default_reinforcement_formula, default_templates,
+};
 use agent_server::studio::{RunExecutionContext, RunExecutor, StudioServer, StudioServerConfig};
 use agent_skills::{SkillSelectionRequest, discover_skills, select_skills};
 use anyhow::{Context, Result, anyhow};
@@ -34,6 +36,8 @@ pub struct StudioArgs {
     pub config: Option<PathBuf>,
     #[arg(long = "artifacts-dir")]
     pub artifacts_dir: Option<PathBuf>,
+    #[arg(long = "sessions-file")]
+    pub sessions_file: Option<PathBuf>,
 }
 
 pub async fn start_studio_server(args: StudioArgs) -> Result<StudioServer> {
@@ -41,12 +45,17 @@ pub async fn start_studio_server(args: StudioArgs) -> Result<StudioServer> {
     let config = resolve_config_inputs(args.config.as_ref(), args.artifacts_dir.clone(), &cwd)?;
     let skill_roots = skill_roots(&cwd, &args.skills_dirs);
     let skills = summarize_skills(&skill_roots)?;
+    let storage_path = args
+        .sessions_file
+        .clone()
+        .unwrap_or_else(|| cwd.join(".t2w").join("studio-state.json"));
     let executor = build_studio_executor(cwd, skill_roots, config);
 
     StudioServer::start(StudioServerConfig {
         bind_addr: build_bind_addr(&args),
         skills,
         executor,
+        storage_path: Some(storage_path),
     })
     .await
 }
@@ -168,13 +177,14 @@ fn build_studio_artifact_shell_context(
     let template = default_templates()
         .into_iter()
         .find(|template| template.id == request.template_id);
-    let template_name = template
-        .as_ref()
-        .map(|template| template.name.clone())
-        .unwrap_or_else(|| request.template_id.clone());
-    let template_description = template
-        .map(|template| template.description)
-        .unwrap_or_else(|| "Studio-selected artifact template.".to_string());
+    let (template_name, template_description, formula) = match template {
+        Some(template) => (template.name, template.description, template.formula),
+        None => (
+            request.template_id.clone(),
+            "Studio-selected artifact template.".to_string(),
+            default_reinforcement_formula(),
+        ),
+    };
     let title = if session_title.trim().is_empty() {
         artifact_title_from_instruction(&request.instruction)
     } else {
@@ -190,6 +200,7 @@ fn build_studio_artifact_shell_context(
         request.provider.clone(),
         request.model.clone(),
     )
+    .with_formula(formula)
 }
 
 fn load_run_skills(
@@ -212,6 +223,11 @@ fn build_provider_for_request(
 ) -> Result<Box<dyn LlmProvider>> {
     match request.provider.to_ascii_lowercase().as_str() {
         "anthropic" => {
+            if !config.anthropic_enabled {
+                return Err(anyhow!(
+                    "anthropic provider is disabled; set T2W_ENABLE_ANTHROPIC=1 to enable key-backed generation"
+                ));
+            }
             let api_key = config
                 .anthropic_api_key
                 .clone()
@@ -269,6 +285,7 @@ mod tests {
             skills_dirs: Vec::new(),
             config: None,
             artifacts_dir: None,
+            sessions_file: None,
         };
 
         assert_eq!(build_bind_addr(&args), "127.0.0.1:4040");
@@ -321,7 +338,7 @@ description: Turn logs into dashboards
     }
 
     #[test]
-    fn template_injected_skill_adds_template_guidance() {
+    fn template_injected_skill_keeps_reinforcement_formula_local() {
         let request = RunRequest {
             instruction: "Build a timeline".to_string(),
             input: agent_core::studio::SessionInput {
@@ -340,5 +357,10 @@ description: Turn logs into dashboards
 
         assert_eq!(injected.name, "template:timeline-report");
         assert!(injected.instructions.contains("Timeline Report"));
+        assert!(!injected.instructions.contains("Reinforcement Formula"));
+        assert!(!injected.instructions.contains("Prompt Formula"));
+        assert!(!injected.instructions.contains("Data Formula"));
+        assert!(!injected.instructions.contains("Theme Formula"));
+        assert!(!injected.instructions.contains("Run Formula"));
     }
 }

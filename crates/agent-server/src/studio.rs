@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -24,9 +24,11 @@ use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::macros::format_description;
+use tokio::fs;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 use tokio::task::JoinHandle;
+use tracing::error;
 use uuid::Uuid;
 
 pub type RunExecutionFuture = Pin<Box<dyn Future<Output = AnyhowResult<()>> + Send>>;
@@ -48,6 +50,7 @@ pub struct StudioServerConfig {
     pub bind_addr: String,
     pub skills: Vec<SkillDescriptor>,
     pub executor: RunExecutor,
+    pub storage_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -58,6 +61,7 @@ struct AppState {
     skills: Arc<Vec<SkillDescriptor>>,
     templates: Arc<Vec<TemplateDescriptor>>,
     executor: RunExecutor,
+    storage_path: Option<PathBuf>,
 }
 
 struct ActiveRun {
@@ -78,6 +82,32 @@ struct RunEntry {
     html: String,
     html_tx: broadcast::Sender<String>,
     event_tx: broadcast::Sender<RunAttempt>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PersistedStudioState {
+    #[serde(default)]
+    sessions: Vec<PersistedSessionRecord>,
+    #[serde(default)]
+    runs: Vec<PersistedRunRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSessionRecord {
+    session: StudioSession,
+    run_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedRunRecord {
+    run: RunAttempt,
+    #[serde(default)]
+    html: String,
+}
+
+struct LoadedStudioState {
+    sessions: HashMap<String, SessionRecord>,
+    runs: HashMap<String, SharedRun>,
 }
 
 #[derive(Clone)]
@@ -182,17 +212,13 @@ impl StudioRunHandle {
                 if record.session.active_run_id.as_deref() == Some(self.run_id.as_str()) {
                     record.session.active_run_id = None;
                 }
-                record.session.status = match status {
-                    RunStatus::Running => SessionStatus::Active,
-                    RunStatus::Completed => SessionStatus::Completed,
-                    RunStatus::Failed => SessionStatus::Failed,
-                    RunStatus::Canceled => SessionStatus::Canceled,
-                };
+                record.session.status = session_status_from_run_status(status);
                 record.session.updated_at = now_string();
             }
         }
 
         self.clear_active_run().await;
+        log_persist_studio_state_error(&self.state).await;
     }
 
     async fn clear_active_run(&self) {
@@ -229,13 +255,16 @@ impl StudioServer {
         let listener = TcpListener::bind(&config.bind_addr).await?;
         let address = listener.local_addr()?;
         let base_url = format!("http://{address}");
+        let storage_path = config.storage_path.clone();
+        let persisted = load_persisted_state(storage_path.as_deref()).await?;
         let state = AppState {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            runs: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(RwLock::new(persisted.sessions)),
+            runs: Arc::new(RwLock::new(persisted.runs)),
             active_run: Arc::new(Mutex::new(None)),
             skills: Arc::new(config.skills),
             templates: Arc::new(default_templates()),
             executor: config.executor,
+            storage_path,
         };
         let app = router(state.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -262,11 +291,224 @@ impl StudioServer {
 
     pub async fn shutdown(mut self) -> AnyhowResult<()> {
         abort_active_run(&self.state).await;
+        log_persist_studio_state_error(&self.state).await;
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
         self.server_task.await??;
         Ok(())
+    }
+}
+
+async fn load_persisted_state(storage_path: Option<&FsPath>) -> AnyhowResult<LoadedStudioState> {
+    let Some(storage_path) = storage_path else {
+        return Ok(empty_loaded_state());
+    };
+    let contents = match fs::read_to_string(storage_path).await {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(empty_loaded_state());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let persisted: PersistedStudioState = match serde_json::from_str(&contents) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            preserve_corrupt_state_file(storage_path).await;
+            error!(
+                ?error,
+                path = %storage_path.display(),
+                "failed to parse persisted studio state; starting with empty state"
+            );
+            return Ok(empty_loaded_state());
+        }
+    };
+    let mut sessions = HashMap::new();
+    let mut runs = HashMap::new();
+    let mut run_statuses = HashMap::new();
+
+    for record in persisted.sessions {
+        sessions.insert(
+            record.session.id.clone(),
+            SessionRecord {
+                session: record.session,
+                run_ids: record.run_ids,
+            },
+        );
+    }
+
+    for record in persisted.runs {
+        let mut run = record.run;
+        recover_non_terminal_run(&mut run);
+        let run_id = run.id.clone();
+        run_statuses.insert(run_id.clone(), run.status);
+        let (html_tx, _) = broadcast::channel(64);
+        let (event_tx, _) = broadcast::channel(64);
+        let entry = Arc::new(RwLock::new(RunEntry {
+            run,
+            html: record.html,
+            html_tx,
+            event_tx,
+        }));
+        let run_snapshot = entry.read().await.run.clone();
+        entry.read().await.event_tx.send(run_snapshot).ok();
+        runs.insert(run_id, entry);
+    }
+
+    for record in sessions.values_mut() {
+        recover_loaded_session(record, &run_statuses);
+    }
+
+    Ok(LoadedStudioState { sessions, runs })
+}
+
+fn empty_loaded_state() -> LoadedStudioState {
+    LoadedStudioState {
+        sessions: HashMap::new(),
+        runs: HashMap::new(),
+    }
+}
+
+fn recover_non_terminal_run(run: &mut RunAttempt) {
+    if run.status.is_terminal() {
+        return;
+    }
+
+    run.status = RunStatus::Canceled;
+    run.phase = RunPhase::Finished;
+    run.error = Some("server restarted during run".to_string());
+    run.finished_at.get_or_insert_with(now_string);
+}
+
+fn recover_loaded_session(record: &mut SessionRecord, run_statuses: &HashMap<String, RunStatus>) {
+    let active_run_is_recoverable = record
+        .session
+        .active_run_id
+        .as_ref()
+        .is_some_and(|run_id| run_statuses.get(run_id).is_some());
+    if !active_run_is_recoverable {
+        record.session.active_run_id = None;
+    }
+
+    if let Some(run_id) = record.session.active_run_id.as_ref()
+        && run_statuses
+            .get(run_id)
+            .is_some_and(|status| status.is_terminal())
+    {
+        record.session.active_run_id = None;
+    }
+
+    if let Some(run_id) = record.session.latest_run_id.as_ref()
+        && let Some(status) = run_statuses.get(run_id)
+    {
+        record.session.status = session_status_from_run_status(*status);
+        return;
+    }
+
+    if record.session.active_run_id.is_none() && record.session.status == SessionStatus::Active {
+        record.session.status = SessionStatus::Canceled;
+    }
+}
+
+async fn preserve_corrupt_state_file(storage_path: &FsPath) {
+    let mut corrupt_path = corrupt_state_path(storage_path);
+    if fs::metadata(&corrupt_path).await.is_ok() {
+        corrupt_path = corrupt_path.with_extension(format!("corrupt.{}", Uuid::new_v4()));
+    }
+
+    if let Err(error) = fs::rename(storage_path, &corrupt_path).await {
+        error!(
+            ?error,
+            path = %storage_path.display(),
+            corrupt_path = %corrupt_path.display(),
+            "failed to preserve corrupt studio state file"
+        );
+    }
+}
+
+fn corrupt_state_path(storage_path: &FsPath) -> PathBuf {
+    match storage_path.extension() {
+        Some(extension) => {
+            let mut corrupt_extension = extension.to_os_string();
+            corrupt_extension.push(".corrupt");
+            storage_path.with_extension(corrupt_extension)
+        }
+        None => storage_path.with_extension("corrupt"),
+    }
+}
+
+async fn write_file_atomically(storage_path: &FsPath, contents: String) -> AnyhowResult<()> {
+    let parent = storage_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| FsPath::new("."));
+    fs::create_dir_all(parent).await?;
+
+    let file_name = storage_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "studio-state.json".to_string());
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+
+    fs::write(&temp_path, contents).await?;
+    match fs::rename(&temp_path, storage_path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if fs::metadata(storage_path).await.is_ok() {
+                fs::remove_file(storage_path).await?;
+            }
+            fs::rename(&temp_path, storage_path).await?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path).await;
+            Err(error.into())
+        }
+    }
+}
+
+async fn persist_studio_state(state: &AppState) -> AnyhowResult<()> {
+    let Some(storage_path) = state.storage_path.as_ref() else {
+        return Ok(());
+    };
+
+    let mut sessions = state
+        .sessions
+        .read()
+        .await
+        .values()
+        .map(|record| PersistedSessionRecord {
+            session: record.session.clone(),
+            run_ids: record.run_ids.clone(),
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| left.session.id.cmp(&right.session.id));
+
+    let mut runs = Vec::new();
+    for shared in state.runs.read().await.values() {
+        let entry = shared.read().await;
+        runs.push(PersistedRunRecord {
+            run: entry.run.clone(),
+            html: entry.html.clone(),
+        });
+    }
+    runs.sort_by(|left, right| left.run.id.cmp(&right.run.id));
+
+    let persisted = PersistedStudioState { sessions, runs };
+    let contents = serde_json::to_string_pretty(&persisted)?;
+    write_file_atomically(storage_path, contents).await?;
+    Ok(())
+}
+
+async fn persist_studio_state_or_api_error(state: &AppState) -> std::result::Result<(), ApiError> {
+    persist_studio_state(state)
+        .await
+        .map_err(|error| ApiError::internal(format!("failed to persist studio state: {error:#}")))
+}
+
+async fn log_persist_studio_state_error(state: &AppState) {
+    if let Err(error) = persist_studio_state(state).await {
+        error!(?error, "failed to persist studio state");
     }
 }
 
@@ -313,9 +555,19 @@ fn router(state: AppState) -> Router {
 }
 
 async fn abort_active_run(state: &AppState) {
-    let mut active = state.active_run.lock().await;
-    if let Some(active_run) = active.take() {
+    let active_run = {
+        let mut active = state.active_run.lock().await;
+        active.take()
+    };
+    if let Some(active_run) = active_run {
+        let run_id = active_run.run_id.clone();
         active_run.task.abort();
+        StudioRunHandle {
+            state: state.clone(),
+            run_id,
+        }
+        .cancel("server shutting down")
+        .await;
     }
 }
 
@@ -419,6 +671,19 @@ impl ApiError {
             },
         }
     }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            payload: ErrorPayload {
+                error: "internal_error".to_string(),
+                message: message.into(),
+                active_run_id: None,
+                active_session_id: None,
+                status: None,
+            },
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -448,6 +713,7 @@ async fn create_session(
             run_ids: Vec::new(),
         },
     );
+    persist_studio_state_or_api_error(&state).await?;
 
     Ok((StatusCode::CREATED, Json(session)))
 }
@@ -512,8 +778,11 @@ async fn update_session(
     updated.updated_at = now_string();
     validate_session(&state, &updated)?;
     record.session = updated;
+    let updated_session = record.session.clone();
+    drop(sessions);
+    persist_studio_state_or_api_error(&state).await?;
 
-    Ok(Json(record.session.clone()))
+    Ok(Json(updated_session))
 }
 
 async fn create_run(
@@ -755,6 +1024,8 @@ async fn artifact_response(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache, no-transform")
+        .header("x-accel-buffering", "no")
         .header(header::CONTENT_SECURITY_POLICY, artifact_csp_header())
         .body(Body::from_stream(stream))
         .unwrap())
@@ -946,6 +1217,7 @@ async fn create_run_entry(
     }));
     entry.read().await.event_tx.send(run.clone()).ok();
     state.runs.write().await.insert(run_id.clone(), entry);
+    persist_studio_state_or_api_error(state).await?;
 
     let handle = StudioRunHandle {
         state: state.clone(),
@@ -1004,6 +1276,15 @@ fn validate_non_empty(field: &str, value: &str) -> std::result::Result<(), ApiEr
         )))
     } else {
         Ok(())
+    }
+}
+
+fn session_status_from_run_status(status: RunStatus) -> SessionStatus {
+    match status {
+        RunStatus::Running => SessionStatus::Active,
+        RunStatus::Completed => SessionStatus::Completed,
+        RunStatus::Failed => SessionStatus::Failed,
+        RunStatus::Canceled => SessionStatus::Canceled,
     }
 }
 
@@ -1151,6 +1432,8 @@ mod tests {
         assert!(body.contains("id=\"run-button\""));
         assert!(body.contains("id=\"download-button\""));
         assert!(body.contains("id=\"preview-frame\""));
+        assert!(body.contains("id=\"formula-list\""));
+        assert!(body.contains("anthropic (opt-in + key)"));
         assert!(body.contains("/sessions"));
         assert!(body.contains("/templates"));
         assert!(body.contains("/skills"));
@@ -1206,6 +1489,12 @@ mod tests {
         assert!(js.contains("/templates"));
         assert!(js.contains("/skills"));
         assert!(js.contains("/sessions"));
+        assert!(js.contains("renderFormulaList"));
+        assert!(js.contains("artifactStreamComplete"));
+        assert!(js.contains("state.artifactStreamComplete = true"));
+        assert!(js.contains("state.artifactStreamComplete"));
+        assert!(js.contains("elements.previewFrame.srcdoc = \"\""));
+        assert!(js.contains("elements.liveMiniFrame.srcdoc = \"\""));
         assert!(!js.contains("https://"));
         assert!(!js.contains("http://"));
 
@@ -1240,6 +1529,129 @@ mod tests {
             Some("Production Cluster Logs")
         );
         assert_eq!(sessions["sessions"][0]["status"].as_str(), Some("draft"));
+
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sessions_and_completed_runs_are_restored_from_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage_path = temp.path().join("studio-state.json");
+        let client = reqwest::Client::new();
+
+        let server = start_server_with_storage(immediate_executor(), storage_path.clone()).await;
+        let session = create_session(&client, server.base_url()).await;
+        let session_id = session["id"].as_str().unwrap().to_string();
+        let run = client
+            .post(format!("{}/sessions/{session_id}/runs", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        let run_id = run["id"].as_str().unwrap().to_string();
+        timeout(
+            Duration::from_secs(5),
+            wait_for_run_status(&client, server.base_url(), &run_id, "completed"),
+        )
+        .await
+        .unwrap();
+        server.shutdown().await.unwrap();
+
+        let server = start_server_with_storage(immediate_executor(), storage_path).await;
+        let sessions = client
+            .get(format!("{}/sessions", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sessions["sessions"][0]["id"].as_str(),
+            Some(session_id.as_str())
+        );
+        assert_eq!(
+            sessions["sessions"][0]["latest_run_id"].as_str(),
+            Some(run_id.as_str())
+        );
+        assert_eq!(
+            sessions["sessions"][0]["status"].as_str(),
+            Some("completed")
+        );
+
+        let restored_run = client
+            .get(format!("{}/runs/{run_id}", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(restored_run["id"].as_str(), Some(run_id.as_str()));
+        assert_eq!(restored_run["status"].as_str(), Some("completed"));
+        assert_eq!(restored_run["attempt"].as_u64(), Some(1));
+
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_terminal_persisted_runs_are_recovered_as_canceled() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage_path = temp.path().join("studio-state.json");
+        std::fs::write(&storage_path, sample_running_persisted_state()).unwrap();
+        let client = reqwest::Client::new();
+
+        let server = start_server_with_storage(immediate_executor(), storage_path).await;
+        let sessions = client
+            .get(format!("{}/sessions", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(sessions["sessions"][0]["status"].as_str(), Some("canceled"));
+        assert!(sessions["sessions"][0]["active_run_id"].is_null());
+
+        let run = client
+            .get(format!("{}/runs/run-1", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(run["status"].as_str(), Some("canceled"));
+        assert_eq!(run["phase"].as_str(), Some("finished"));
+        assert!(run["finished_at"].as_str().is_some());
+        assert_eq!(run["error"].as_str(), Some("server restarted during run"));
+
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupt_persisted_state_is_preserved_and_does_not_block_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage_path = temp.path().join("studio-state.json");
+        std::fs::write(&storage_path, "{not valid json").unwrap();
+        let client = reqwest::Client::new();
+
+        let server = start_server_with_storage(immediate_executor(), storage_path.clone()).await;
+        let sessions = client
+            .get(format!("{}/sessions", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+
+        assert_eq!(sessions["sessions"].as_array().unwrap().len(), 0);
+        assert!(!storage_path.exists());
+        assert!(storage_path.with_extension("json.corrupt").exists());
 
         server.shutdown().await.unwrap();
     }
@@ -1762,6 +2174,19 @@ mod tests {
                 .iter()
                 .any(|template| template["id"].as_str() == Some("table-explorer"))
         );
+        let table_template = templates["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|template| template["id"].as_str() == Some("table-explorer"))
+            .unwrap();
+        let formula_ids = table_template["formula"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|stage| stage["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(formula_ids, vec!["prompt", "data", "theme", "run"]);
 
         let skills = client
             .get(format!("{}/skills", server.base_url()))
@@ -1816,6 +2241,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn studio_artifact_route_disables_buffering_for_realtime_rendering() {
+        let server = start_server(immediate_executor()).await;
+        let client = reqwest::Client::new();
+
+        let session = create_session(&client, server.base_url()).await;
+        let run = client
+            .post(format!(
+                "{}/sessions/{}/runs",
+                server.base_url(),
+                session["id"].as_str().unwrap()
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+
+        let response = client
+            .get(format!(
+                "{}{}",
+                server.base_url(),
+                run["artifact_url"].as_str().unwrap()
+            ))
+            .send()
+            .await
+            .unwrap();
+        let headers = response.headers();
+
+        assert_eq!(
+            headers
+                .get(reqwest::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache, no-transform")
+        );
+        assert_eq!(
+            headers
+                .get("x-accel-buffering")
+                .and_then(|value| value.to_str().ok()),
+            Some("no")
+        );
+
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn cancel_completed_nested_run_is_idempotent() {
         let server = start_server(immediate_executor()).await;
         let client = reqwest::Client::new();
@@ -1861,6 +2332,24 @@ mod tests {
                 description: "Turn logs into dashboards".to_string(),
             }],
             executor,
+            storage_path: None,
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn start_server_with_storage(
+        executor: RunExecutor,
+        storage_path: std::path::PathBuf,
+    ) -> StudioServer {
+        StudioServer::start(StudioServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            skills: vec![SkillDescriptor {
+                name: "log-dashboard".to_string(),
+                description: "Turn logs into dashboards".to_string(),
+            }],
+            executor,
+            storage_path: Some(storage_path),
         })
         .await
         .unwrap()
@@ -1893,6 +2382,66 @@ mod tests {
                 "persist_snapshot": false
             }
         })
+    }
+
+    fn sample_running_persisted_state() -> String {
+        json!({
+            "sessions": [{
+                "session": {
+                    "id": "session-1",
+                    "title": "Production Cluster Logs",
+                    "status": "active",
+                    "instruction": "Build a log artifact",
+                    "input": {
+                        "stdin": "ERROR request failed"
+                    },
+                    "template_id": "table-explorer",
+                    "skill_ids": ["log-dashboard"],
+                    "provider": "mock",
+                    "model": "mock-model",
+                    "options": {
+                        "persist_snapshot": false
+                    },
+                    "latest_run_id": "run-1",
+                    "active_run_id": "run-1",
+                    "created_at": "2026-05-24T00:00:00Z",
+                    "updated_at": "2026-05-24T00:00:01Z"
+                },
+                "run_ids": ["run-1"]
+            }],
+            "runs": [{
+                "run": {
+                    "id": "run-1",
+                    "session_id": "session-1",
+                    "attempt": 1,
+                    "status": "running",
+                    "phase": "streaming",
+                    "request": {
+                        "instruction": "Build a log artifact",
+                        "input": {
+                            "stdin": "ERROR request failed"
+                        },
+                        "template_id": "table-explorer",
+                        "skill_ids": ["log-dashboard"],
+                        "provider": "mock",
+                        "model": "mock-model",
+                        "options": {
+                            "persist_snapshot": false
+                        }
+                    },
+                    "live_url": "/sessions/session-1/runs/run-1/live",
+                    "artifact_url": "/sessions/session-1/runs/run-1/artifact",
+                    "events_url": "/sessions/session-1/runs/run-1/events",
+                    "snapshot_path": null,
+                    "error": null,
+                    "created_at": "2026-05-24T00:00:01Z",
+                    "started_at": "2026-05-24T00:00:01Z",
+                    "finished_at": null
+                },
+                "html": "<!DOCTYPE html>"
+            }]
+        })
+        .to_string()
     }
 
     fn immediate_executor() -> RunExecutor {

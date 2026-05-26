@@ -33,7 +33,7 @@ pub mod studio;
 #[command(name = "t2w")]
 pub struct CliArgs {
     pub instruction: String,
-    #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
+    #[arg(long, value_enum, default_value_t = ProviderKind::Mock)]
     pub provider: ProviderKind,
     #[arg(long = "skill")]
     pub skills: Vec<String>,
@@ -80,6 +80,7 @@ pub struct RunSummary {
 struct FileConfig {
     artifacts_dir: Option<PathBuf>,
     anthropic_api_key: Option<String>,
+    anthropic_enabled: Option<bool>,
     anthropic_model: Option<String>,
     mock_chunk_delay_ms: Option<u64>,
 }
@@ -88,6 +89,7 @@ struct FileConfig {
 struct ResolvedConfig {
     artifacts_dir: PathBuf,
     anthropic_api_key: Option<String>,
+    anthropic_enabled: bool,
     anthropic_model: String,
     mock_chunk_delay_ms: u64,
 }
@@ -225,6 +227,10 @@ fn resolve_config_inputs(
     let anthropic_api_key = env::var("T2W_ANTHROPIC_API_KEY")
         .ok()
         .or(file_config.anthropic_api_key);
+    let anthropic_enabled = env_bool("T2W_ENABLE_ANTHROPIC")
+        .or_else(|| env_bool("T2W_ANTHROPIC_ENABLED"))
+        .or(file_config.anthropic_enabled)
+        .unwrap_or(false);
     let anthropic_model = env::var("T2W_ANTHROPIC_MODEL")
         .ok()
         .or(file_config.anthropic_model)
@@ -238,9 +244,19 @@ fn resolve_config_inputs(
     Ok(ResolvedConfig {
         artifacts_dir,
         anthropic_api_key,
+        anthropic_enabled,
         anthropic_model,
         mock_chunk_delay_ms,
     })
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    let value = env::var(name).ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn read_stdin() -> Result<String> {
@@ -316,6 +332,11 @@ fn should_descend(entry: &DirEntry, root: &Path) -> bool {
 fn build_provider(kind: ProviderKind, config: &ResolvedConfig) -> Result<Box<dyn LlmProvider>> {
     match kind {
         ProviderKind::Anthropic => {
+            if !config.anthropic_enabled {
+                return Err(anyhow!(
+                    "anthropic provider is disabled; set T2W_ENABLE_ANTHROPIC=1 to enable key-backed generation"
+                ));
+            }
             let api_key = config
                 .anthropic_api_key
                 .clone()
@@ -395,10 +416,15 @@ fn normalize_provider_error(error: ProviderError) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::{env, fs};
 
-    use super::{BrowserLauncher, CliArgs, ProviderKind, resolve_config, save_snapshot};
+    use super::{
+        BrowserLauncher, CliArgs, ProviderKind, ResolvedConfig, build_provider, resolve_config,
+        save_snapshot,
+    };
+    use clap::Parser;
 
     struct RecordingLauncher {
         opened: Arc<Mutex<Vec<String>>>,
@@ -417,6 +443,32 @@ mod tests {
             self.opened.lock().unwrap().push(url.to_string());
             Ok(())
         }
+    }
+
+    #[test]
+    fn cli_defaults_to_mock_provider() {
+        let args = CliArgs::parse_from(["t2w", "build a dashboard"]);
+
+        assert_eq!(args.provider, ProviderKind::Mock);
+    }
+
+    #[test]
+    fn anthropic_provider_requires_explicit_enable_before_key() {
+        let error = match build_provider(
+            ProviderKind::Anthropic,
+            &ResolvedConfig {
+                artifacts_dir: PathBuf::from(".t2w/artifacts"),
+                anthropic_api_key: Some("test-key".to_string()),
+                anthropic_model: "claude-sonnet-4-5".to_string(),
+                anthropic_enabled: false,
+                mock_chunk_delay_ms: 0,
+            },
+        ) {
+            Ok(_) => panic!("anthropic provider should require explicit enablement"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("anthropic provider is disabled"));
     }
 
     #[test]

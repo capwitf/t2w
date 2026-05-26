@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::studio::{FormulaStep, default_reinforcement_formula};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactShellContext {
     pub title: String,
@@ -9,6 +11,7 @@ pub struct ArtifactShellContext {
     pub template_description: String,
     pub provider: String,
     pub model: String,
+    pub formula: Vec<FormulaStep>,
 }
 
 impl ArtifactShellContext {
@@ -29,7 +32,13 @@ impl ArtifactShellContext {
             template_description: template_description.into(),
             provider: provider.into(),
             model: model.into(),
+            formula: default_reinforcement_formula(),
         }
+    }
+
+    pub fn with_formula(mut self, formula: Vec<FormulaStep>) -> Self {
+        self.formula = formula;
+        self
     }
 }
 
@@ -43,6 +52,7 @@ struct ArtifactShellMetadata<'a> {
     template_description: &'a str,
     provider: &'a str,
     model: &'a str,
+    formula: &'a [FormulaStep],
 }
 
 pub fn artifact_title_from_instruction(instruction: &str) -> String {
@@ -93,6 +103,7 @@ fn render_shell_document(
     let template_description = escape_html(&context.template_description);
     let provider = escape_html(&context.provider);
     let model = escape_html(&context.model);
+    let formula = render_formula(&context.formula);
     let metadata_json = shell_metadata_json(context);
 
     format!(
@@ -406,7 +417,7 @@ fn render_shell_document(
 
     .tabs {{
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       border-bottom: 1px solid var(--line-soft);
     }}
 
@@ -459,6 +470,24 @@ fn render_shell_document(
       line-height: 1.55;
     }}
 
+    .console-live-frame-wrap {{
+      margin-top: 10px;
+      height: min(48vh, 460px);
+      min-height: 280px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: var(--preview);
+    }}
+
+    #console-live-frame {{
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: white;
+      color-scheme: light;
+    }}
+
     .meta-list {{
       display: grid;
       gap: 10px;
@@ -481,6 +510,58 @@ fn render_shell_document(
       font-weight: 650;
       text-align: right;
       overflow-wrap: anywhere;
+    }}
+
+    .formula-list {{
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }}
+
+    .formula-stage {{
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius);
+      background: var(--panel-high);
+    }}
+
+    .formula-stage-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }}
+
+    .formula-stage-head span {{
+      color: var(--accent-soft);
+      font-size: 11px;
+      font-family: var(--mono);
+      text-transform: uppercase;
+    }}
+
+    .formula-stage-head strong {{
+      color: var(--text);
+      font-size: 13px;
+      text-align: right;
+    }}
+
+    .formula-stage p {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }}
+
+    .formula-stage ul {{
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      padding-left: 16px;
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.45;
     }}
 
     .actions {{
@@ -619,6 +700,7 @@ fn render_shell_document(
       <div class="tabs" role="tablist" aria-label="Artifact console tabs">
         <button id="tab-prompt" class="tab" type="button" role="tab" aria-selected="true" data-tab="prompt"><span>▣</span><span>Prompt</span></button>
         <button id="tab-data" class="tab" type="button" role="tab" aria-selected="false" data-tab="data"><span>▦</span><span>Data</span></button>
+        <button id="tab-live" class="tab" type="button" role="tab" aria-selected="false" data-tab="live"><span>▤</span><span>Live</span></button>
         <button id="tab-theme" class="tab" type="button" role="tab" aria-selected="false" data-tab="theme"><span>▥</span><span>Theme</span></button>
         <button id="tab-run" class="tab" type="button" role="tab" aria-selected="false" data-tab="run"><span>▷</span><span>Run</span></button>
       </div>
@@ -638,6 +720,13 @@ fn render_shell_document(
         <div class="readout"><pre>{stdin}</pre></div>
       </section>
 
+      <section class="panel" role="tabpanel" data-panel="live">
+        <p class="eyebrow">Live Render</p>
+        <div class="console-live-frame-wrap">
+          <iframe id="console-live-frame" title="Console live artifact render" sandbox="allow-scripts" srcdoc="{escaped_artifact_html}"></iframe>
+        </div>
+      </section>
+
       <section class="panel" role="tabpanel" data-panel="theme">
         <p class="eyebrow">Template</p>
         <div class="meta-list">
@@ -646,6 +735,8 @@ fn render_shell_document(
           <div class="meta-row"><span>Accent</span><strong>Amber #f59e0b</strong></div>
         </div>
         <div class="readout"><pre>{template_description}</pre></div>
+        <p class="eyebrow">Reinforcement Formula</p>
+        <div class="formula-list">{formula}</div>
       </section>
 
       <section class="panel" role="tabpanel" data-panel="run">
@@ -668,11 +759,16 @@ fn render_shell_document(
   <script>
     (function () {{
       const frame = document.getElementById("artifact-frame");
+      const consoleFrame = document.getElementById("console-live-frame");
       const status = document.getElementById("stream-status");
       const statusDetail = document.getElementById("run-status-detail");
       const byteCount = document.getElementById("byte-count");
       const context = JSON.parse(document.getElementById("t2w-run-context").textContent || "{{}}");
       const chunks = [];
+      const scheduleFrame = window.requestAnimationFrame
+        ? window.requestAnimationFrame.bind(window)
+        : function (callback) {{ return window.setTimeout(callback, 16); }};
+      let previewRenderQueued = false;
 
       function currentHtml() {{
         return chunks.length ? chunks.join("") : (frame.getAttribute("srcdoc") || "");
@@ -713,15 +809,36 @@ fn render_shell_document(
         }}, 700);
       }}
 
-      window.__t2wAppendArtifactChunk = function (chunk) {{
-        chunks.push(chunk);
+      function renderConsoleNow(html) {{
+        if (consoleFrame) {{
+          consoleFrame.srcdoc = html;
+        }}
+      }}
+
+      function renderPreviewNow() {{
+        previewRenderQueued = false;
         const html = currentHtml();
         frame.srcdoc = html;
-        setRunStatus("streaming");
+        renderConsoleNow(html);
         updateBytes(html);
+      }}
+
+      function schedulePreviewRender() {{
+        if (previewRenderQueued) {{
+          return;
+        }}
+        previewRenderQueued = true;
+        scheduleFrame(renderPreviewNow);
+      }}
+
+      window.__t2wAppendArtifactChunk = function (chunk) {{
+        chunks.push(chunk);
+        setRunStatus("streaming");
+        schedulePreviewRender();
       }};
 
       window.__t2wMarkArtifactComplete = function () {{
+        renderPreviewNow();
         setRunStatus("completed");
         updateBytes(currentHtml());
       }};
@@ -785,9 +902,31 @@ fn shell_metadata_json(context: &ArtifactShellContext) -> String {
         template_description: &context.template_description,
         provider: &context.provider,
         model: &context.model,
+        formula: &context.formula,
     };
 
     safe_script_json(&serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string()))
+}
+
+fn render_formula(stages: &[FormulaStep]) -> String {
+    stages
+        .iter()
+        .map(|stage| {
+            let id = escape_html(&stage.id.to_ascii_uppercase());
+            let title = escape_html(&stage.title);
+            let description = escape_html(&stage.description);
+            let rules = stage
+                .rules
+                .iter()
+                .map(|rule| format!("<li>{}</li>", escape_html(rule)))
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                r#"<article class="formula-stage"><div class="formula-stage-head"><span>{id}</span><strong>{title}</strong></div><p>{description}</p><ul>{rules}</ul></article>"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn render_pre_text(value: &str, fallback: &str) -> String {
@@ -821,7 +960,7 @@ fn safe_script_json(json: &str) -> String {
 mod tests {
     use super::{
         ArtifactShellContext, artifact_title_from_instruction, render_artifact_shell,
-        render_artifact_shell_stream_chunk,
+        render_artifact_shell_stream_chunk, render_artifact_shell_stream_start,
     };
 
     fn context() -> ArtifactShellContext {
@@ -855,15 +994,30 @@ mod tests {
 
         assert!(shell.contains("id=\"tab-prompt\""));
         assert!(shell.contains("id=\"tab-data\""));
+        assert!(shell.contains("id=\"tab-live\""));
         assert!(shell.contains("id=\"tab-theme\""));
         assert!(shell.contains("id=\"tab-run\""));
+        assert!(shell.contains("id=\"console-live-frame\""));
+        assert!(shell.contains("data-panel=\"live\""));
         assert!(shell.contains("data-panel=\"theme\""));
         assert!(shell.contains("id=\"export-html\""));
         assert!(shell.contains("id=\"run-generate\""));
         assert!(shell.contains("id=\"toggle-fullscreen\""));
         assert!(shell.contains("simulateRun"));
         assert!(shell.contains("setRunStatus(\"streaming\")"));
+        assert!(shell.contains("renderConsoleNow"));
         assert!(shell.contains("downloadInnerHtml"));
+    }
+
+    #[test]
+    fn render_artifact_shell_exposes_reinforcement_formula() {
+        let shell = render_artifact_shell(&context(), "<main><h1>Mock Artifact</h1></main>");
+
+        assert!(shell.contains("Reinforcement Formula"));
+        assert!(shell.contains("Prompt Formula"));
+        assert!(shell.contains("Data Formula"));
+        assert!(shell.contains("Theme Formula"));
+        assert!(shell.contains("Run Formula"));
     }
 
     #[test]
@@ -872,6 +1026,14 @@ mod tests {
 
         assert!(chunk.contains("<\\/script>"));
         assert!(!chunk.contains("</script><h1>ok"));
+    }
+
+    #[test]
+    fn render_stream_start_schedules_live_preview_refreshes_on_animation_frames() {
+        let shell = render_artifact_shell_stream_start(&context());
+
+        assert!(shell.contains("requestAnimationFrame"));
+        assert!(shell.contains("schedulePreviewRender"));
     }
 
     #[test]

@@ -21,6 +21,9 @@
     snapshotSummary: document.getElementById("snapshot-summary"),
     previewFrame: document.getElementById("preview-frame"),
     previewPlaceholder: document.getElementById("preview-placeholder"),
+    liveMiniFrame: document.getElementById("live-mini-frame"),
+    htmlSourceView: document.getElementById("html-source-view"),
+    copyHtmlButton: document.getElementById("copy-html-button"),
     runPhase: document.getElementById("run-phase"),
     runSnapshot: document.getElementById("run-snapshot"),
     runError: document.getElementById("run-error"),
@@ -36,6 +39,7 @@
     providerSelect: document.getElementById("provider-select"),
     modelInput: document.getElementById("model-input"),
     persistSnapshotInput: document.getElementById("persist-snapshot-input"),
+    formulaList: document.getElementById("formula-list"),
     skillsList: document.getElementById("skills-list"),
     tabButtons: Array.from(document.querySelectorAll(".tab-button")),
     tabPanels: Array.from(document.querySelectorAll(".tab-panel")),
@@ -61,6 +65,11 @@
     message: null,
     eventSource: null,
     busy: false,
+    rawHtml: "",
+    artifactStreamComplete: false,
+    streamAbort: null,
+    streamGeneration: 0,
+    previewScheduled: false,
   };
 
   init();
@@ -90,10 +99,14 @@
 
     elements.newDraftButton.addEventListener("click", function () {
       disconnectRunStream();
+      abortArtifactStream();
       state.selectedSessionId = null;
       state.currentRun = null;
+      state.rawHtml = "";
+      state.artifactStreamComplete = false;
       state.form = createDraft();
       clearMessage();
+      renderPreview();
       render();
     });
 
@@ -107,6 +120,14 @@
 
     elements.downloadButton.addEventListener("click", function () {
       void downloadArtifact();
+    });
+
+    elements.copyHtmlButton.addEventListener("click", function () {
+      if (state.rawHtml) {
+        navigator.clipboard.writeText(state.rawHtml);
+        setMessage("info", "HTML copied to clipboard.");
+        render();
+      }
     });
 
     elements.titleInput.addEventListener("input", function (event) {
@@ -192,10 +213,14 @@
     }
 
     disconnectRunStream();
+    abortArtifactStream();
     state.selectedSessionId = session.id;
     state.form = cloneSession(session);
     state.currentRun = null;
+    state.rawHtml = "";
+    state.artifactStreamComplete = false;
     renderStaticSelections();
+    renderPreview();
 
     if (session.latest_run_id) {
       try {
@@ -290,6 +315,7 @@
     }
 
     state.busy = true;
+    abortArtifactStream();
     render();
 
     try {
@@ -314,12 +340,12 @@
     }
 
     try {
-      const response = await fetch(state.currentRun.artifact_url, { credentials: "same-origin" });
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(body || "Failed to download artifact.");
+      const html = state.rawHtml;
+      if (!html) {
+        setMessage("error", "No HTML content available to download.");
+        render();
+        return;
       }
-      const html = await response.text();
       const blob = new Blob([html], { type: "text/html;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -339,8 +365,14 @@
 
   function connectRun(run) {
     disconnectRunStream();
+    abortArtifactStream();
     state.currentRun = run;
-    elements.previewFrame.src = run.artifact_url;
+    state.rawHtml = "";
+    state.artifactStreamComplete = false;
+
+    if (run.artifact_url) {
+      streamArtifact(run.artifact_url);
+    }
 
     if (runIsActive(run)) {
       state.eventSource = new EventSource(run.events_url);
@@ -369,6 +401,88 @@
       };
     } else {
       synchronizeSessionFromRun(run);
+    }
+  }
+
+  function abortArtifactStream() {
+    if (state.streamAbort) {
+      state.streamAbort.abort();
+      state.streamAbort = null;
+    }
+    state.artifactStreamComplete = false;
+    state.streamGeneration += 1;
+  }
+
+  async function streamArtifact(url) {
+    const controller = new AbortController();
+    state.streamAbort = controller;
+    const generation = state.streamGeneration;
+    renderPreview();
+
+    let reader = null;
+    try {
+      const response = await fetch(url, {
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
+      if (!response.ok || generation !== state.streamGeneration) {
+        if (generation === state.streamGeneration) state.streamAbort = null;
+        return;
+      }
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const result = await reader.read();
+        if (result.done) break;
+        if (generation !== state.streamGeneration) {
+          reader.cancel();
+          return;
+        }
+        state.rawHtml += decoder.decode(result.value, { stream: true });
+        schedulePreviewUpdate();
+      }
+      if (generation !== state.streamGeneration) return;
+      state.rawHtml += decoder.decode();
+      state.artifactStreamComplete = true;
+      state.streamAbort = null;
+      renderPreview();
+      render();
+    } catch (error) {
+      if (generation !== state.streamGeneration) return;
+      state.streamAbort = null;
+      if (error.name !== "AbortError") {
+        setMessage("error", "Artifact stream failed: " + error.message);
+        render();
+      }
+    }
+  }
+
+  function schedulePreviewUpdate() {
+    if (state.previewScheduled) return;
+    state.previewScheduled = true;
+    requestAnimationFrame(function () {
+      state.previewScheduled = false;
+      renderPreview();
+    });
+  }
+
+  function renderPreview() {
+    const html = state.rawHtml;
+    elements.previewPlaceholder.hidden = Boolean(html);
+    if (html) {
+      elements.previewFrame.srcdoc = html;
+      if (elements.liveMiniFrame) {
+        elements.liveMiniFrame.srcdoc = html;
+      }
+    } else {
+      elements.previewFrame.srcdoc = "";
+      if (elements.liveMiniFrame) {
+        elements.liveMiniFrame.srcdoc = "";
+      }
+    }
+    if (elements.htmlSourceView) {
+      elements.htmlSourceView.textContent = html;
     }
   }
 
@@ -493,10 +607,14 @@
       "<span class=\"session-item-meta\">Unsaved changes remain in this browser until you run.</span>";
     draftButton.addEventListener("click", function () {
       disconnectRunStream();
+      abortArtifactStream();
       state.selectedSessionId = null;
       state.currentRun = null;
+      state.rawHtml = "";
+      state.artifactStreamComplete = false;
       state.form = createDraft();
       clearMessage();
+      renderPreview();
       render();
     });
     elements.sessionList.appendChild(draftButton);
@@ -532,6 +650,7 @@
     elements.templateDescription.textContent = template ? template.description : "No template available.";
     elements.selectedTemplateName.textContent = template ? template.name : state.form.template_id;
     elements.selectedTemplateDescription.textContent = template ? template.description : "No template description available.";
+    renderFormulaList(template ? template.formula : []);
     elements.providerSelect.value = state.form.provider;
     elements.modelInput.value = state.form.model;
     elements.persistSnapshotInput.checked = Boolean(state.form.options.persist_snapshot);
@@ -542,8 +661,6 @@
     Array.from(elements.skillsList.querySelectorAll("input[type='checkbox']")).forEach(function (checkbox) {
       checkbox.checked = state.form.skill_ids.includes(checkbox.value);
     });
-
-    elements.previewPlaceholder.hidden = Boolean(run && run.artifact_url);
   }
 
   function renderRunState() {
@@ -567,6 +684,49 @@
     elements.runErrorDetail.textContent = run && run.error ? run.error : "none";
   }
 
+  function renderFormulaList(formula) {
+    elements.formulaList.innerHTML = "";
+    const stages = Array.isArray(formula) ? formula : [];
+    if (!stages.length) {
+      const empty = document.createElement("p");
+      empty.className = "subtle-copy";
+      empty.textContent = "No reinforcement formula is available for this template.";
+      elements.formulaList.appendChild(empty);
+      return;
+    }
+
+    stages.forEach(function (stage) {
+      const section = document.createElement("section");
+      section.className = "formula-step";
+
+      const head = document.createElement("div");
+      head.className = "formula-step-head";
+
+      const code = document.createElement("span");
+      code.textContent = String(stage.id || "").toUpperCase();
+
+      const title = document.createElement("strong");
+      title.textContent = stage.title || "Formula";
+
+      head.appendChild(code);
+      head.appendChild(title);
+      section.appendChild(head);
+
+      const description = document.createElement("p");
+      description.textContent = stage.description || "";
+      section.appendChild(description);
+
+      const rules = document.createElement("ul");
+      (Array.isArray(stage.rules) ? stage.rules : []).forEach(function (rule) {
+        const item = document.createElement("li");
+        item.textContent = rule;
+        rules.appendChild(item);
+      });
+      section.appendChild(rules);
+      elements.formulaList.appendChild(section);
+    });
+  }
+
   function applyPanelMode() {
     document.body.dataset.panelOpen = state.panelOpen ? "true" : "false";
     elements.configToggle.setAttribute("aria-expanded", state.panelOpen ? "true" : "false");
@@ -580,7 +740,12 @@
   }
 
   function canDownload() {
-    return Boolean(state.currentRun && state.currentRun.artifact_url && !runIsActive(state.currentRun));
+    return Boolean(
+      state.rawHtml &&
+      state.artifactStreamComplete &&
+      state.currentRun &&
+      !runIsActive(state.currentRun)
+    );
   }
 
   function currentTemplate() {

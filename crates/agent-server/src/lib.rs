@@ -244,6 +244,8 @@ async fn artifact_page(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache, no-transform")
+        .header("x-accel-buffering", "no")
         .header(header::CONTENT_SECURITY_POLICY, artifact_csp_header())
         .body(Body::from_stream(stream))
         .unwrap())
@@ -495,6 +497,37 @@ mod tests {
         assert!(csp.contains("script-src 'unsafe-inline'"));
         assert!(csp.contains("frame-ancestors 'self'"));
         assert!(!csp.contains("frame-ancestors 'none'"));
+
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn artifact_route_disables_buffering_for_realtime_rendering() {
+        let server = PreviewServer::start().await.unwrap();
+        let session = server
+            .create_session("realtime-headers".to_string())
+            .await
+            .unwrap();
+        session.push_html("<!DOCTYPE html><html></html>").await;
+        session.complete(None).await;
+
+        let response = reqwest::get(server.artifact_url("realtime-headers"))
+            .await
+            .unwrap();
+        let headers = response.headers();
+
+        assert_eq!(
+            headers
+                .get(reqwest::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache, no-transform")
+        );
+        assert_eq!(
+            headers
+                .get("x-accel-buffering")
+                .and_then(|value| value.to_str().ok()),
+            Some("no")
+        );
 
         server.shutdown().await.unwrap();
     }
